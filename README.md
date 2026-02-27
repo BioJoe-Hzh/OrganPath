@@ -1,6 +1,6 @@
 # OrganPath
 
-`OrganPath` is a command-line package for building phylogenetic trees from a `vcf.gz` file:
+`organpath` is a command-line package for building phylogenetic trees from a `vcf.gz` file:
 
 1. sample coverage/depth statistics and removal of highly-missing samples
 2. uncertain genotype masking to missing (`./.`)
@@ -11,7 +11,7 @@
 ## Install
 
 ```bash
-cd vcf2tree
+cd OrganPath
 python -m pip install -e .
 ```
 
@@ -33,6 +33,8 @@ Then validate:
 
 ```bash
 OrganPath check
+# or
+organpath check
 ```
 
 ## Usage
@@ -49,4 +51,6 @@ Or run tree inference separately:
 
 ```bash
 OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
+# or call PhyView directly:
+PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
 ```

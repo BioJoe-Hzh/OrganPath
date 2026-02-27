@@ -565,5 +565,29 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 2
 
 
+def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="PhyView",
+        description="Build tree with IQ-TREE on trimmed multifasta",
+    )
+    parser.add_argument("-i", "--input", required=True, help="Trimmed multifasta file")
+    parser.add_argument("-o", "--outdir", required=True, help="Output directory for IQ-TREE")
+    parser.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
+    parser.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
+    parser.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="[%(levelname)s] %(message)s",
+    )
+    try:
+        return cmd_phyview(args)
+    except Exception as exc:
+        logger.error("%s", exc)
+        return 2
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "OrganPath"
+name = "organpath"
 version = "0.1.0"
 description = "VCF to phylogeny pipeline for organelle genomes."
 readme = "README.md"
@@ -16,6 +16,8 @@ dependencies = []
 
 [project.scripts]
 OrganPath = "organpath.cli:main"
+organpath = "organpath.cli:main"
+PhyView = "organpath.cli:phyview_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
