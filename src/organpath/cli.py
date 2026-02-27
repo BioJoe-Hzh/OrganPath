@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import gzip
 import logging
 import shutil
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 MISSING_GT = {".", "./.", ".|.", "././.", ".|.|."}
+DEFAULT_MIN_COVERAGE = 0.5
+DEFAULT_MIN_MEAN_DEPTH = 10.0
+DEFAULT_MIN_DP = 8
+DEFAULT_MIN_GQ = 30.0
 
 
 @dataclass
@@ -245,6 +250,7 @@ def filter_vcf_and_build_consensus(
     min_dp: int,
     min_gq: float,
     het_as_missing: bool,
+    sample_threads: int = 1,
 ) -> None:
     refs = parse_ref_fasta(ref_fasta)
     sample_seqs: Dict[str, Dict[str, List[str]]] = {
@@ -252,6 +258,10 @@ def filter_vcf_and_build_consensus(
     }
 
     sample_index: Dict[str, int] = {}
+
+    executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+    if sample_threads > 1:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=sample_threads)
 
     with open_maybe_gzip(vcf_path, "rt") as inp, out_vcf.open("wt") as out:
         for raw in inp:
@@ -263,7 +273,8 @@ def filter_vcf_and_build_consensus(
                 cols = raw.rstrip("\n").split("\t")
                 all_samples = cols[9:]
                 sample_index = {s: i for i, s in enumerate(all_samples)}
-                selected = [s for s in all_samples if s in set(keep_samples)]
+                keep_set = set(keep_samples)
+                selected = [s for s in all_samples if s in keep_set]
                 out.write("\t".join(cols[:9] + selected) + "\n")
                 continue
 
@@ -282,11 +293,9 @@ def filter_vcf_and_build_consensus(
             fmt_keys = fields[8].split(":")
             all_sample_fields = fields[9:]
 
-            selected_fields: List[str] = []
-            for s in keep_samples:
+            def process_one_sample(s: str) -> Tuple[str, str, str]:
                 i = sample_index[s]
                 sf = all_sample_fields[i] if i < len(all_sample_fields) else "."
-
                 uncertain = is_uncertain_genotype(
                     sf,
                     fmt_keys,
@@ -296,16 +305,28 @@ def filter_vcf_and_build_consensus(
                 )
                 if uncertain:
                     sf = mask_gt_to_missing(sf, fmt_keys)
-
                 vals = sf.split(":")
                 gt = vals[fmt_keys.index("GT")] if "GT" in fmt_keys and fmt_keys.index("GT") < len(vals) else "."
+                base = "N"
                 if len(ref) == 1:
                     base = choose_base_from_gt(gt, ref, alts)
-                    sample_seqs[s][chrom][pos - 1] = base
+                return s, sf, base
 
+            if executor is not None:
+                results = list(executor.map(process_one_sample, keep_samples))
+            else:
+                results = [process_one_sample(s) for s in keep_samples]
+
+            selected_fields = []
+            for s, sf, base in results:
+                if len(ref) == 1:
+                    sample_seqs[s][chrom][pos - 1] = base
                 selected_fields.append(sf)
 
             out.write("\t".join(fields[:9] + selected_fields) + "\n")
+
+    if executor is not None:
+        executor.shutdown(wait=True)
 
     sample_fastas_dir.mkdir(parents=True, exist_ok=True)
     with multifasta_path.open("wt") as multi:
@@ -424,6 +445,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         min_dp=args.min_dp,
         min_gq=args.min_gq,
         het_as_missing=not args.keep_het,
+        sample_threads=max(1, args.sample_threads),
     )
     logger.info("Generated filtered VCF and consensus FASTA files.")
 
@@ -509,20 +531,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     subs = parser.add_subparsers(dest="command")
 
-    p_run = subs.add_parser("run", help="Run full workflow from VCF to trimmed alignment")
+    p_run = subs.add_parser(
+        "run",
+        help="Run full workflow from VCF to trimmed alignment",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     p_run.add_argument("-v", "--vcf", required=True, help="Input VCF or VCF.GZ")
     p_run.add_argument("-r", "--ref", required=True, help="Reference fasta")
     p_run.add_argument("-o", "--outdir", required=True, help="Output directory")
-    p_run.add_argument("--min-coverage", type=float, default=0.5, help="Min sample coverage")
+    p_run.add_argument(
+        "--min-coverage",
+        type=float,
+        default=DEFAULT_MIN_COVERAGE,
+        help="Min sample coverage",
+    )
     p_run.add_argument(
         "--min-mean-depth",
         type=float,
-        default=5.0,
+        default=DEFAULT_MIN_MEAN_DEPTH,
         help="Drop sample only when coverage < threshold AND mean depth <= this value",
     )
-    p_run.add_argument("--min-dp", type=int, default=3, help="Mark genotype missing if DP < this")
-    p_run.add_argument("--min-gq", type=float, default=20.0, help="Mark genotype missing if GQ < this")
+    p_run.add_argument(
+        "--min-dp",
+        type=int,
+        default=DEFAULT_MIN_DP,
+        help="Mark genotype missing if DP < this",
+    )
+    p_run.add_argument(
+        "--min-gq",
+        type=float,
+        default=DEFAULT_MIN_GQ,
+        help="Mark genotype missing if GQ < this",
+    )
     p_run.add_argument("--keep-het", action="store_true", help="Keep heterozygous genotype (default: mask)")
+    p_run.add_argument(
+        "--sample-threads",
+        type=int,
+        default=1,
+        help="Thread number for per-sample genotype/consensus processing",
+    )
     p_run.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_run.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_run.add_argument("--run-phyview", action="store_true", help="Also run OrganPath PhyView after trimming")

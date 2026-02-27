@@ -44,8 +44,15 @@ OrganPath run \
   -v input.vcf.gz \
   -r ref.fa \
   -o organpath_out \
+  --sample-threads 8 \
   --run-phyview
 ```
+
+Default filtering thresholds:
+- `--min-coverage 0.5`
+- `--min-mean-depth 10`
+- `--min-dp 8`
+- `--min-gq 30`
 
 Or run tree inference separately:
 
