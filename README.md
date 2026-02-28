@@ -21,7 +21,7 @@ python -m pip install -e .
 
 - `mafft`
 - `trimal`
-- `iqtree2` (or `iqtree`)
+- `iqtree2` (preferred; fallback to `iqtree`)
 
 Recommended installation on Linux server:
 
@@ -60,4 +60,7 @@ Or run tree inference separately:
 OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
 # or call PhyView directly:
 PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
+
+# default uses IQ-TREE -safe; disable only if needed:
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --unsafe
 ```

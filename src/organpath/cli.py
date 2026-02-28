@@ -376,27 +376,29 @@ def run_phyview(
     ufboot: int = 1000,
     threads: str = "AUTO",
     model: str = "MFP",
+    safe: bool = True,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     iqtree_bin = shutil.which("iqtree2") or shutil.which("iqtree")
     if not iqtree_bin:
         raise RuntimeError("Required tool not found: iqtree2 or iqtree")
     prefix = out_dir / "organpath_tree"
-    run_command(
-        [
-            iqtree_bin,
-            "-s",
-            str(trimmed_fasta),
-            "-m",
-            model,
-            "-B",
-            str(ufboot),
-            "-T",
-            threads,
-            "--prefix",
-            str(prefix),
-        ]
-    )
+    cmd = [
+        iqtree_bin,
+        "-s",
+        str(trimmed_fasta),
+        "-m",
+        model,
+        "-B",
+        str(ufboot),
+        "-T",
+        threads,
+        "--prefix",
+        str(prefix),
+    ]
+    if safe:
+        cmd.append("-safe")
+    run_command(cmd)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -461,6 +463,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             ufboot=args.ufboot,
             threads=args.threads,
             model=args.model,
+            safe=not args.unsafe,
         )
         logger.info("PhyView tree inference completed.")
 
@@ -475,6 +478,7 @@ def cmd_phyview(args: argparse.Namespace) -> int:
         ufboot=args.ufboot,
         threads=args.threads,
         model=args.model,
+        safe=not args.unsafe,
     )
     logger.info("PhyView completed: %s", Path(args.outdir).resolve())
     return 0
@@ -576,6 +580,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number for iqtree")
     p_run.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_run.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_run.add_argument(
+        "--unsafe",
+        action="store_true",
+        help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_phy = subs.add_parser("PhyView", help="Build tree with IQ-TREE on trimmed multifasta")
@@ -584,6 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_phy.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     p_phy.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_phy.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_phy.add_argument(
+        "--unsafe",
+        action="store_true",
+        help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
+    )
     p_phy.set_defaults(func=cmd_phyview)
 
     p_chk = subs.add_parser("check", help="Check runtime environment and external tools")
@@ -622,6 +636,11 @@ def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     parser.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     parser.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    parser.add_argument(
+        "--unsafe",
+        action="store_true",
+        help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
