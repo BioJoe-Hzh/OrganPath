@@ -677,28 +677,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     logger.info("Alignment and trimming completed.")
 
     if args.run_phyview:
-        if not args.skip_ml:
-            run_phyview(
-                trimmed_fasta=trimmed,
-                out_dir=out_dir / "phyview",
-                ufboot=args.ufboot,
-                threads=args.threads,
-                model=args.model,
-                safe=not args.unsafe,
-            )
-        else:
-            (out_dir / "phyview").mkdir(parents=True, exist_ok=True)
-            logger.info("Skipping IQ-TREE ML step (--skip-ml).")
-        seqs = read_fasta_sequences(trimmed)
-        names, mat = build_distance_matrix(seqs)
-        write_distance_matrix_tsv(names, mat, out_dir / "phyview" / "pairwise_distance.tsv")
-        if not args.no_nj:
-            build_nj_tree(names, mat, out_dir / "phyview" / "nj_tree.nwk")
-        if not args.no_popart:
-            _hap_tsv, popart_nex = prepare_popart_inputs(trimmed, out_dir / "phyview")
-            if args.run_popart:
-                run_popart_cli(args.popart_bin, popart_nex, out_dir / "phyview", args.popart_args)
-        logger.info("PhyView tree inference completed.")
+        run_phyview(
+            trimmed_fasta=trimmed,
+            out_dir=out_dir / "phyview",
+            ufboot=args.ufboot,
+            threads=args.threads,
+            model=args.model,
+            safe=not args.unsafe,
+        )
+        logger.info("PhyView ML tree inference completed.")
 
     logger.info("All outputs are in: %s", out_dir)
     return 0
@@ -707,7 +694,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_phyview(args: argparse.Namespace) -> int:
     trimmed = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
-    if not args.skip_ml:
+    mode_count = int(args.run_ml) + int(args.run_nj) + int(args.run_popart)
+    if mode_count != 1:
+        raise ValueError("PhyView requires exactly one mode: --run_ml or --run_nj or --run_popart")
+    if args.exec_popart and not args.run_popart:
+        raise ValueError("--exec-popart is only valid together with --run_popart")
+
+    if args.run_ml:
         run_phyview(
             trimmed_fasta=trimmed,
             out_dir=out_dir,
@@ -716,19 +709,27 @@ def cmd_phyview(args: argparse.Namespace) -> int:
             model=args.model,
             safe=not args.unsafe,
         )
-    else:
+        logger.info("PhyView completed (ML): %s", out_dir)
+        return 0
+
+    if args.run_nj:
         out_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Skipping IQ-TREE ML step (--skip-ml).")
-    seqs = read_fasta_sequences(trimmed)
-    names, mat = build_distance_matrix(seqs)
-    write_distance_matrix_tsv(names, mat, out_dir / "pairwise_distance.tsv")
-    if not args.no_nj:
+        seqs = read_fasta_sequences(trimmed)
+        names, mat = build_distance_matrix(seqs)
+        write_distance_matrix_tsv(names, mat, out_dir / "pairwise_distance.tsv")
         build_nj_tree(names, mat, out_dir / "nj_tree.nwk")
-    if not args.no_popart:
+        logger.info("PhyView completed (NJ): %s", out_dir)
+        return 0
+
+    if args.run_popart:
+        out_dir.mkdir(parents=True, exist_ok=True)
         _hap_tsv, popart_nex = prepare_popart_inputs(trimmed, out_dir)
-        if args.run_popart:
+        if args.exec_popart:
             run_popart_cli(args.popart_bin, popart_nex, out_dir, args.popart_args)
-    logger.info("PhyView completed: %s", Path(args.outdir).resolve())
+        logger.info("PhyView completed (PopART inputs): %s", out_dir)
+        return 0
+
+    logger.info("PhyView completed: %s", out_dir)
     return 0
 
 
@@ -861,12 +862,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number for iqtree")
     p_run.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_run.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
-    p_run.add_argument("--skip-ml", action="store_true", help="Skip IQ-TREE ML tree step in PhyView stage")
-    p_run.add_argument("--no-nj", action="store_true", help="Skip NJ tree construction in PhyView stage")
-    p_run.add_argument("--no-popart", action="store_true", help="Skip PopART input generation in PhyView stage")
-    p_run.add_argument("--run-popart", action="store_true", help="Execute PopART CLI after preparing inputs")
-    p_run.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
-    p_run.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
     p_run.add_argument(
         "--unsafe",
         action="store_true",
@@ -880,10 +875,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_phy.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     p_phy.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_phy.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
-    p_phy.add_argument("--skip-ml", action="store_true", help="Skip IQ-TREE ML tree step")
-    p_phy.add_argument("--no-nj", action="store_true", help="Skip NJ tree construction")
-    p_phy.add_argument("--no-popart", action="store_true", help="Skip PopART input generation")
-    p_phy.add_argument("--run-popart", action="store_true", help="Execute PopART CLI after preparing inputs")
+    mode_group = p_phy.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
+    mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")
+    mode_group.add_argument("--run_popart", "--run-popart", action="store_true", help="Prepare PopART haplotype inputs")
+    p_phy.add_argument("--exec-popart", action="store_true", help="Execute PopART CLI (valid with --run_popart)")
     p_phy.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
     p_phy.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
     p_phy.add_argument(
@@ -938,10 +934,11 @@ def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     parser.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     parser.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
-    parser.add_argument("--skip-ml", action="store_true", help="Skip IQ-TREE ML tree step")
-    parser.add_argument("--no-nj", action="store_true", help="Skip NJ tree construction")
-    parser.add_argument("--no-popart", action="store_true", help="Skip PopART input generation")
-    parser.add_argument("--run-popart", action="store_true", help="Execute PopART CLI after preparing inputs")
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
+    mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")
+    mode_group.add_argument("--run_popart", "--run-popart", action="store_true", help="Prepare PopART haplotype inputs")
+    parser.add_argument("--exec-popart", action="store_true", help="Execute PopART CLI (valid with --run_popart)")
     parser.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
     parser.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
     parser.add_argument(

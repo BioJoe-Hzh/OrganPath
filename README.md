@@ -71,24 +71,20 @@ Outputs include:
 - `sample_stats.tsv` (both old and output IDs)
 - renamed IDs in `filtered.kept.masked.vcf` and fasta headers
 
-Or run tree inference separately:
+Or run `PhyView` as explicit single-mode jobs (must choose one):
 
 ```bash
-OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
-# or call PhyView directly:
-PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
+# 1) ML tree only (IQ-TREE, default safe mode):
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview_ml --run_ml
 
-# default uses IQ-TREE -safe; disable only if needed:
-OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --unsafe
+# 2) NJ tree only:
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview_nj --run_nj
 
-# skip NJ or PopART input generation if needed:
-OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --no-nj --no-popart
+# 3) PopART input only:
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview_popart --run_popart
 
-# optionally run PopART CLI after generating popart_input.nex:
-OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --run-popart --popart-bin popart
-
-# NJ + haplotype network only (skip ML/IQ-TREE):
-OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --skip-ml
+# Optional: execute PopART CLI after preparing input files:
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview_popart --run_popart --exec-popart --popart-bin popart
 ```
 
 Rename IDs in an existing tree only:
