@@ -6,7 +6,10 @@
 2. uncertain genotype masking to missing (`./.`)
 3. per-sample consensus generation from reference (`N` for missing)
 4. MSA with `mafft` and trimming with `trimal`
-5. tree inference with `iqtree`/`iqtree2` (UFBoot), via `OrganPath PhyView`
+5. PhyView stage:
+   - ML tree inference with `iqtree2`/`iqtree` (UFBoot)
+   - pairwise distance matrix and NJ tree
+   - PopART haplotype-network input preparation
 
 ## Install
 
@@ -22,6 +25,9 @@ python -m pip install -e .
 - `mafft`
 - `trimal`
 - `iqtree2` (preferred; fallback to `iqtree`)
+
+Python dependency:
+- `biopython` (for NJ tree construction)
 
 Recommended installation on Linux server:
 
@@ -74,6 +80,15 @@ PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
 
 # default uses IQ-TREE -safe; disable only if needed:
 OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --unsafe
+
+# skip NJ or PopART input generation if needed:
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --no-nj --no-popart
+
+# optionally run PopART CLI after generating popart_input.nex:
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --run-popart --popart-bin popart
+
+# NJ + haplotype network only (skip ML/IQ-TREE):
+OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --skip-ml
 ```
 
 Rename IDs in an existing tree only:

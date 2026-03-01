@@ -7,6 +7,7 @@ import subprocess
 import sys
 import importlib.util
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -490,6 +491,131 @@ def run_phyview(
     run_command(cmd)
 
 
+def read_fasta_sequences(path: Path) -> Dict[str, str]:
+    seqs: Dict[str, str] = {}
+    cur = None
+    chunks: List[str] = []
+    with path.open("rt") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if cur is not None:
+                    seqs[cur] = "".join(chunks).upper()
+                cur = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+    if cur is not None:
+        seqs[cur] = "".join(chunks).upper()
+    if not seqs:
+        raise ValueError(f"No sequences found in fasta: {path}")
+    return seqs
+
+
+def pairwise_distance(seq1: str, seq2: str) -> float:
+    valid = 0
+    diff = 0
+    for a, b in zip(seq1, seq2):
+        if a in {"N", "-", "?"} or b in {"N", "-", "?"}:
+            continue
+        valid += 1
+        if a != b:
+            diff += 1
+    if valid == 0:
+        return 1.0
+    return diff / valid
+
+
+def build_distance_matrix(seqs: Dict[str, str]) -> Tuple[List[str], List[List[float]]]:
+    names = list(seqs.keys())
+    if len(set(len(v) for v in seqs.values())) != 1:
+        raise ValueError("Sequences in trimmed fasta do not have equal lengths.")
+    n = len(names)
+    mat = [[0.0 for _ in range(n)] for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = pairwise_distance(seqs[names[i]], seqs[names[j]])
+            mat[i][j] = d
+            mat[j][i] = d
+    return names, mat
+
+
+def write_distance_matrix_tsv(names: List[str], mat: List[List[float]], out_path: Path) -> None:
+    with out_path.open("wt") as out:
+        out.write("sample\t" + "\t".join(names) + "\n")
+        for i, name in enumerate(names):
+            out.write(name + "\t" + "\t".join(f"{mat[i][j]:.6f}" for j in range(len(names))) + "\n")
+
+
+def build_nj_tree(names: List[str], mat: List[List[float]], out_path: Path) -> None:
+    try:
+        from Bio import Phylo
+        from Bio.Phylo.TreeConstruction import DistanceMatrix, DistanceTreeConstructor
+    except ImportError as exc:
+        raise RuntimeError(
+            "Biopython is required for NJ tree construction. Install with: pip install biopython"
+        ) from exc
+
+    lower_triangle: List[List[float]] = []
+    for i in range(len(names)):
+        lower_triangle.append([mat[i][j] for j in range(i + 1)])
+
+    dm = DistanceMatrix(names=names, matrix=lower_triangle)
+    constructor = DistanceTreeConstructor()
+    tree = constructor.nj(dm)
+    Phylo.write(tree, str(out_path), "newick")
+
+
+def prepare_popart_inputs(trimmed_fasta: Path, out_dir: Path) -> Tuple[Path, Path]:
+    seqs = read_fasta_sequences(trimmed_fasta)
+    hap_to_samples: Dict[str, List[str]] = defaultdict(list)
+    for sample, seq in seqs.items():
+        hap_to_samples[seq].append(sample)
+
+    hap_ids: Dict[str, str] = {}
+    for i, hap_seq in enumerate(hap_to_samples.keys(), start=1):
+        hap_ids[hap_seq] = f"HAP{i}"
+
+    hap_tsv = out_dir / "haplotypes.tsv"
+    with hap_tsv.open("wt") as out:
+        out.write("haplotype_id\tsize\tsamples\n")
+        for seq, samples in hap_to_samples.items():
+            out.write(f"{hap_ids[seq]}\t{len(samples)}\t{','.join(samples)}\n")
+
+    nchar = len(next(iter(seqs.values())))
+    popart_nex = out_dir / "popart_input.nex"
+    with popart_nex.open("wt") as out:
+        out.write("#NEXUS\n\n")
+        out.write("BEGIN TAXA;\n")
+        out.write(f"  DIMENSIONS NTAX={len(seqs)};\n")
+        out.write("  TAXLABELS\n")
+        for s in seqs:
+            out.write(f"    {s}\n")
+        out.write("  ;\nEND;\n\n")
+        out.write("BEGIN CHARACTERS;\n")
+        out.write(f"  DIMENSIONS NCHAR={nchar};\n")
+        out.write("  FORMAT DATATYPE=DNA MISSING=? GAP=-;\n")
+        out.write("  MATRIX\n")
+        for s, seq in seqs.items():
+            out.write(f"    {s} {seq}\n")
+        out.write("  ;\nEND;\n")
+    return hap_tsv, popart_nex
+
+
+def run_popart_cli(popart_bin: str, popart_input: Path, out_dir: Path, extra_args: List[str]) -> None:
+    p = shutil.which(popart_bin)
+    if not p:
+        raise RuntimeError(
+            f"PopART executable not found: {popart_bin}. "
+            "Install PopART or set --popart-bin correctly."
+        )
+    cmd = [p] + extra_args + [str(popart_input)]
+    logger.info("Running PopART command: %s", " ".join(cmd))
+    run_command(cmd)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.outdir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -551,14 +677,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     logger.info("Alignment and trimming completed.")
 
     if args.run_phyview:
-        run_phyview(
-            trimmed_fasta=trimmed,
-            out_dir=out_dir / "phyview",
-            ufboot=args.ufboot,
-            threads=args.threads,
-            model=args.model,
-            safe=not args.unsafe,
-        )
+        if not args.skip_ml:
+            run_phyview(
+                trimmed_fasta=trimmed,
+                out_dir=out_dir / "phyview",
+                ufboot=args.ufboot,
+                threads=args.threads,
+                model=args.model,
+                safe=not args.unsafe,
+            )
+        else:
+            (out_dir / "phyview").mkdir(parents=True, exist_ok=True)
+            logger.info("Skipping IQ-TREE ML step (--skip-ml).")
+        seqs = read_fasta_sequences(trimmed)
+        names, mat = build_distance_matrix(seqs)
+        write_distance_matrix_tsv(names, mat, out_dir / "phyview" / "pairwise_distance.tsv")
+        if not args.no_nj:
+            build_nj_tree(names, mat, out_dir / "phyview" / "nj_tree.nwk")
+        if not args.no_popart:
+            _hap_tsv, popart_nex = prepare_popart_inputs(trimmed, out_dir / "phyview")
+            if args.run_popart:
+                run_popart_cli(args.popart_bin, popart_nex, out_dir / "phyview", args.popart_args)
         logger.info("PhyView tree inference completed.")
 
     logger.info("All outputs are in: %s", out_dir)
@@ -566,14 +705,29 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_phyview(args: argparse.Namespace) -> int:
-    run_phyview(
-        trimmed_fasta=Path(args.input).resolve(),
-        out_dir=Path(args.outdir).resolve(),
-        ufboot=args.ufboot,
-        threads=args.threads,
-        model=args.model,
-        safe=not args.unsafe,
-    )
+    trimmed = Path(args.input).resolve()
+    out_dir = Path(args.outdir).resolve()
+    if not args.skip_ml:
+        run_phyview(
+            trimmed_fasta=trimmed,
+            out_dir=out_dir,
+            ufboot=args.ufboot,
+            threads=args.threads,
+            model=args.model,
+            safe=not args.unsafe,
+        )
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Skipping IQ-TREE ML step (--skip-ml).")
+    seqs = read_fasta_sequences(trimmed)
+    names, mat = build_distance_matrix(seqs)
+    write_distance_matrix_tsv(names, mat, out_dir / "pairwise_distance.tsv")
+    if not args.no_nj:
+        build_nj_tree(names, mat, out_dir / "nj_tree.nwk")
+    if not args.no_popart:
+        _hap_tsv, popart_nex = prepare_popart_inputs(trimmed, out_dir)
+        if args.run_popart:
+            run_popart_cli(args.popart_bin, popart_nex, out_dir, args.popart_args)
     logger.info("PhyView completed: %s", Path(args.outdir).resolve())
     return 0
 
@@ -612,6 +766,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     for mod in ["gzip", "argparse", "pathlib"]:
         if importlib.util.find_spec(mod) is None:
             missing_python.append(mod)
+    if importlib.util.find_spec("Bio") is None:
+        missing_python.append("biopython (Bio)")
 
     for tool in ["mafft", "trimal"]:
         if shutil.which(tool) is None:
@@ -705,6 +861,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number for iqtree")
     p_run.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_run.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_run.add_argument("--skip-ml", action="store_true", help="Skip IQ-TREE ML tree step in PhyView stage")
+    p_run.add_argument("--no-nj", action="store_true", help="Skip NJ tree construction in PhyView stage")
+    p_run.add_argument("--no-popart", action="store_true", help="Skip PopART input generation in PhyView stage")
+    p_run.add_argument("--run-popart", action="store_true", help="Execute PopART CLI after preparing inputs")
+    p_run.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
+    p_run.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
     p_run.add_argument(
         "--unsafe",
         action="store_true",
@@ -718,6 +880,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_phy.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     p_phy.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_phy.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_phy.add_argument("--skip-ml", action="store_true", help="Skip IQ-TREE ML tree step")
+    p_phy.add_argument("--no-nj", action="store_true", help="Skip NJ tree construction")
+    p_phy.add_argument("--no-popart", action="store_true", help="Skip PopART input generation")
+    p_phy.add_argument("--run-popart", action="store_true", help="Execute PopART CLI after preparing inputs")
+    p_phy.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
+    p_phy.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
     p_phy.add_argument(
         "--unsafe",
         action="store_true",
@@ -770,6 +938,12 @@ def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     parser.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
     parser.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    parser.add_argument("--skip-ml", action="store_true", help="Skip IQ-TREE ML tree step")
+    parser.add_argument("--no-nj", action="store_true", help="Skip NJ tree construction")
+    parser.add_argument("--no-popart", action="store_true", help="Skip PopART input generation")
+    parser.add_argument("--run-popart", action="store_true", help="Execute PopART CLI after preparing inputs")
+    parser.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
+    parser.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
     parser.add_argument(
         "--unsafe",
         action="store_true",
