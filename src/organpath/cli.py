@@ -565,6 +565,17 @@ def build_nj_tree(names: List[str], mat: List[List[float]], out_path: Path) -> N
     dm = DistanceMatrix(names=names, matrix=lower_triangle)
     constructor = DistanceTreeConstructor()
     tree = constructor.nj(dm)
+
+    # NJ may yield small negative branch lengths due to non-additive distances
+    # and numerical noise. Clamp to 0 for stable downstream visualization.
+    neg_count = 0
+    for clade in tree.find_clades():
+        if clade.branch_length is not None and clade.branch_length < 0:
+            clade.branch_length = 0.0
+            neg_count += 1
+    if neg_count > 0:
+        logger.info("NJ tree: clamped %d negative branch lengths to 0.", neg_count)
+
     Phylo.write(tree, str(out_path), "newick")
 
 
@@ -869,23 +880,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.set_defaults(func=cmd_run)
 
-    p_phy = subs.add_parser("PhyView", help="Build tree with IQ-TREE on trimmed multifasta")
-    p_phy.add_argument("-i", "--input", required=True, help="Trimmed multifasta file")
-    p_phy.add_argument("-o", "--outdir", required=True, help="Output directory for IQ-TREE")
-    p_phy.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
-    p_phy.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
-    p_phy.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_phy = subs.add_parser("PhyView", help="Run one selected phylogenetic/relationship task on trimmed multifasta")
+    p_phy.add_argument("-i", "--input", required=True, help="Input trimmed multifasta (FASTA)")
+    p_phy.add_argument("-o", "--outdir", required=True, help="Output directory for the selected task")
+    p_phy.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number (used with --run_ml)")
+    p_phy.add_argument("--threads", default="AUTO", help="Thread setting for IQ-TREE -T (used with --run_ml)")
+    p_phy.add_argument("--model", default="MFP", help="Model option for IQ-TREE -m (used with --run_ml)")
     mode_group = p_phy.add_mutually_exclusive_group(required=True)
     mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
     mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")
     mode_group.add_argument("--run_popart", "--run-popart", action="store_true", help="Prepare PopART haplotype inputs")
-    p_phy.add_argument("--exec-popart", action="store_true", help="Execute PopART CLI (valid with --run_popart)")
-    p_phy.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
-    p_phy.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
+    p_phy.add_argument(
+        "--exec-popart",
+        action="store_true",
+        help="Execute PopART CLI after preparing input files (used with --run_popart)",
+    )
+    p_phy.add_argument("--popart-bin", default="popart", help="PopART executable name/path (used with --run_popart)")
+    p_phy.add_argument(
+        "--popart-args",
+        nargs="*",
+        default=[],
+        help="Extra args passed to PopART CLI (used with --run_popart)",
+    )
     p_phy.add_argument(
         "--unsafe",
         action="store_true",
-        help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
+        help="Disable IQ-TREE safe likelihood kernel (used with --run_ml; default uses -safe)",
     )
     p_phy.set_defaults(func=cmd_phyview)
 
@@ -927,24 +947,33 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="PhyView",
-        description="Build tree with IQ-TREE on trimmed multifasta",
+        description="Run one selected PhyView task on trimmed multifasta",
     )
-    parser.add_argument("-i", "--input", required=True, help="Trimmed multifasta file")
-    parser.add_argument("-o", "--outdir", required=True, help="Output directory for IQ-TREE")
-    parser.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
-    parser.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
-    parser.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    parser.add_argument("-i", "--input", required=True, help="Input trimmed multifasta (FASTA)")
+    parser.add_argument("-o", "--outdir", required=True, help="Output directory for the selected task")
+    parser.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number (used with --run_ml)")
+    parser.add_argument("--threads", default="AUTO", help="Thread setting for IQ-TREE -T (used with --run_ml)")
+    parser.add_argument("--model", default="MFP", help="Model option for IQ-TREE -m (used with --run_ml)")
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
     mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")
     mode_group.add_argument("--run_popart", "--run-popart", action="store_true", help="Prepare PopART haplotype inputs")
-    parser.add_argument("--exec-popart", action="store_true", help="Execute PopART CLI (valid with --run_popart)")
-    parser.add_argument("--popart-bin", default="popart", help="PopART executable name/path")
-    parser.add_argument("--popart-args", nargs="*", default=[], help="Extra args passed to PopART CLI")
+    parser.add_argument(
+        "--exec-popart",
+        action="store_true",
+        help="Execute PopART CLI after preparing input files (used with --run_popart)",
+    )
+    parser.add_argument("--popart-bin", default="popart", help="PopART executable name/path (used with --run_popart)")
+    parser.add_argument(
+        "--popart-args",
+        nargs="*",
+        default=[],
+        help="Extra args passed to PopART CLI (used with --run_popart)",
+    )
     parser.add_argument(
         "--unsafe",
         action="store_true",
-        help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
+        help="Disable IQ-TREE safe likelihood kernel (used with --run_ml; default uses -safe)",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args(list(argv) if argv is not None else None)
