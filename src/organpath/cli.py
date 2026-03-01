@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import importlib.util
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -200,14 +201,100 @@ def compute_sample_stats(vcf_path: Path, samples: List[str]) -> Dict[str, Sample
     return stats
 
 
-def write_stats_table(stats: Dict[str, SampleStats], path: Path) -> None:
+def write_stats_table_with_name_map(
+    stats: Dict[str, SampleStats],
+    name_map: Dict[str, str],
+    path: Path,
+) -> None:
     with path.open("wt") as out:
-        out.write("sample\ttotal_sites\tcalled_sites\tcoverage\tmean_depth\n")
+        out.write("old_id\toutput_id\ttotal_sites\tcalled_sites\tcoverage\tmean_depth\n")
         for sample, s in stats.items():
             out.write(
-                f"{sample}\t{s.total_sites}\t{s.called_sites}\t"
-                f"{s.coverage:.4f}\t{s.mean_depth:.4f}\n"
+                f"{sample}\t{name_map.get(sample, sample)}\t"
+                f"{s.total_sites}\t{s.called_sites}\t{s.coverage:.4f}\t{s.mean_depth:.4f}\n"
             )
+
+
+def load_sample_name_map(samples: List[str], id_map_path: Optional[Path]) -> Tuple[Dict[str, str], str]:
+    name_map = {s: s for s in samples}
+    if id_map_path is None:
+        return name_map, "none"
+    if not id_map_path.exists():
+        raise FileNotFoundError(f"id-map file not found: {id_map_path}")
+
+    raw_map: Dict[str, str] = {}
+    with id_map_path.open("rt") as fh:
+        for ln, raw in enumerate(fh, start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split()
+            if len(cols) < 2:
+                raise ValueError(f"Invalid id-map line {ln}: expected at least 2 columns")
+            raw_map[cols[0]] = cols[1]
+
+    mapped_vals = [raw_map[s] for s in samples if s in raw_map]
+    mode = "rename"
+    if len(mapped_vals) != len(set(mapped_vals)):
+        mode = "pop"
+
+    for s in samples:
+        if s not in raw_map:
+            continue
+        name_map[s] = raw_map[s] if mode == "rename" else f"{raw_map[s]}_{s}"
+
+    new_names = list(name_map.values())
+    if len(new_names) != len(set(new_names)):
+        raise ValueError(
+            "Output sample names are not unique after id-map conversion; "
+            "please adjust id_map/pop assignments."
+        )
+    return name_map, mode
+
+
+def safe_filename(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+
+
+def write_name_map(path: Path, samples: List[str], name_map: Dict[str, str], mode: str) -> None:
+    with path.open("wt") as out:
+        out.write(f"# mode={mode}\n")
+        out.write("old_id\toutput_id\n")
+        for s in samples:
+            out.write(f"{s}\t{name_map.get(s, s)}\n")
+
+
+def extract_tree_tip_names(newick_text: str) -> List[str]:
+    names: List[str] = []
+
+    for m in re.finditer(r"(?<=\(|,)'([^']*)'(?=\s*[:),;])", newick_text):
+        names.append(m.group(1))
+    for m in re.finditer(r"(?<=\(|,)\s*([^'():;,][^():;,]*)\s*(?=\s*[:),;])", newick_text):
+        cand = m.group(1).strip()
+        if cand:
+            names.append(cand)
+
+    seen = set()
+    ordered: List[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+
+def rename_newick_tips(newick_text: str, name_map: Dict[str, str]) -> str:
+    def repl_quoted(match: re.Match) -> str:
+        old = match.group(1)
+        return "'" + name_map.get(old, old) + "'"
+
+    def repl_unquoted(match: re.Match) -> str:
+        old = match.group(1).strip()
+        return name_map.get(old, old)
+
+    txt = re.sub(r"(?<=\(|,)'([^']*)'(?=\s*[:),;])", repl_quoted, newick_text)
+    txt = re.sub(r"(?<=\(|,)\s*([^'():;,][^():;,]*)\s*(?=\s*[:),;])", repl_unquoted, txt)
+    return txt
 
 
 def keep_samples_by_threshold(
@@ -247,6 +334,7 @@ def filter_vcf_and_build_consensus(
     sample_fastas_dir: Path,
     multifasta_path: Path,
     keep_samples: List[str],
+    sample_name_map: Dict[str, str],
     min_dp: int,
     min_gq: float,
     het_as_missing: bool,
@@ -274,7 +362,7 @@ def filter_vcf_and_build_consensus(
                 all_samples = cols[9:]
                 sample_index = {s: i for i, s in enumerate(all_samples)}
                 keep_set = set(keep_samples)
-                selected = [s for s in all_samples if s in keep_set]
+                selected = [sample_name_map.get(s, s) for s in all_samples if s in keep_set]
                 out.write("\t".join(cols[:9] + selected) + "\n")
                 continue
 
@@ -331,14 +419,15 @@ def filter_vcf_and_build_consensus(
     sample_fastas_dir.mkdir(parents=True, exist_ok=True)
     with multifasta_path.open("wt") as multi:
         for s in keep_samples:
+            out_name = sample_name_map.get(s, s)
             seq = "".join(
                 "".join(sample_seqs[s][ctg]) for ctg in sorted(sample_seqs[s].keys())
             )
-            indiv = sample_fastas_dir / f"{s}.fa"
+            indiv = sample_fastas_dir / f"{safe_filename(out_name)}.fa"
             with indiv.open("wt") as out:
-                out.write(f">{s}\n")
+                out.write(f">{out_name}\n")
                 out.write(f"{seq}\n")
-            multi.write(f">{s}\n{seq}\n")
+            multi.write(f">{out_name}\n{seq}\n")
 
 
 def run_command(cmd: List[str], stdout_path: Optional[Path] = None) -> None:
@@ -410,10 +499,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     _headers, samples = read_header_and_samples(vcf_path)
     logger.info("Detected %d samples in VCF.", len(samples))
+    id_map_path = Path(args.id_map).resolve() if args.id_map else None
+    sample_name_map, id_map_mode = load_sample_name_map(samples, id_map_path)
+    logger.info("Sample naming mode: %s", id_map_mode)
+    write_name_map(out_dir / "name_map.tsv", samples, sample_name_map, id_map_mode)
 
     stats = compute_sample_stats(vcf_path, samples)
     stats_tsv = out_dir / "sample_stats.tsv"
-    write_stats_table(stats, stats_tsv)
+    write_stats_table_with_name_map(stats, sample_name_map, stats_tsv)
 
     keep, drop = keep_samples_by_threshold(
         stats,
@@ -423,9 +516,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     logger.info("Kept %d samples, dropped %d samples.", len(keep), len(drop))
 
     with (out_dir / "kept_samples.txt").open("wt") as f:
-        f.write("\n".join(keep) + ("\n" if keep else ""))
+        f.write("\n".join(sample_name_map[s] for s in keep) + ("\n" if keep else ""))
     with (out_dir / "dropped_samples.txt").open("wt") as f:
-        f.write("\n".join(drop) + ("\n" if drop else ""))
+        f.write("\n".join(sample_name_map[s] for s in drop) + ("\n" if drop else ""))
 
     if not keep:
         logger.error("No samples passed filtering; stop.")
@@ -444,6 +537,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         sample_fastas_dir=sample_fastas,
         multifasta_path=multifasta,
         keep_samples=keep,
+        sample_name_map=sample_name_map,
         min_dp=args.min_dp,
         min_gq=args.min_gq,
         het_as_missing=not args.keep_het,
@@ -481,6 +575,33 @@ def cmd_phyview(args: argparse.Namespace) -> int:
         safe=not args.unsafe,
     )
     logger.info("PhyView completed: %s", Path(args.outdir).resolve())
+    return 0
+
+
+def cmd_rename_tree(args: argparse.Namespace) -> int:
+    tree_in = Path(args.input).resolve()
+    tree_out = Path(args.output).resolve()
+    id_map_path = Path(args.id_map).resolve()
+
+    if not tree_in.exists():
+        raise FileNotFoundError(f"Input tree not found: {tree_in}")
+
+    newick = tree_in.read_text()
+    tip_names = extract_tree_tip_names(newick)
+    if not tip_names:
+        raise ValueError("No tip names were detected from the input tree.")
+
+    name_map, mode = load_sample_name_map(tip_names, id_map_path)
+    renamed = rename_newick_tips(newick, name_map)
+
+    tree_out.parent.mkdir(parents=True, exist_ok=True)
+    tree_out.write_text(renamed)
+    map_path = tree_out.with_suffix(tree_out.suffix + ".name_map.tsv")
+    write_name_map(map_path, tip_names, name_map, mode)
+
+    logger.info("Renamed tree written to: %s", tree_out)
+    logger.info("Name mapping written to: %s", map_path)
+    logger.info("Rename mode: %s", mode)
     return 0
 
 
@@ -544,6 +665,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("-r", "--ref", required=True, help="Reference fasta")
     p_run.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_run.add_argument(
+        "--id-map",
+        help="Two-column file. oldID newID => rename; oldID POP (repeated POP labels) => rename to POP_oldID",
+    )
+    p_run.add_argument(
         "--min-coverage",
         type=float,
         default=DEFAULT_MIN_COVERAGE,
@@ -599,6 +724,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
     )
     p_phy.set_defaults(func=cmd_phyview)
+
+    p_rename = subs.add_parser(
+        "RenameTree",
+        help="Rename tip IDs in Newick tree using id_map/pop file",
+    )
+    p_rename.add_argument("-i", "--input", required=True, help="Input Newick tree file")
+    p_rename.add_argument("-m", "--id-map", required=True, help="Two-column id_map/pop file")
+    p_rename.add_argument("-o", "--output", required=True, help="Output Newick tree file")
+    p_rename.set_defaults(func=cmd_rename_tree)
 
     p_chk = subs.add_parser("check", help="Check runtime environment and external tools")
     p_chk.set_defaults(func=cmd_check)

@@ -54,6 +54,17 @@ Default filtering thresholds:
 - `--min-dp 8`
 - `--min-gq 30`
 
+Sample rename options (`--id-map`):
+- Rename mode (`oldID newID`, second column unique):
+  `A01 Sample_01`
+- Population-prefix mode (`oldID POP`, second column repeated):
+  `A01 POP1` -> output name becomes `POP1_A01`
+
+Outputs include:
+- `name_map.tsv` (`old_id -> output_id`)
+- `sample_stats.tsv` (both old and output IDs)
+- renamed IDs in `filtered.kept.masked.vcf` and fasta headers
+
 Or run tree inference separately:
 
 ```bash
@@ -63,4 +74,13 @@ PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview
 
 # default uses IQ-TREE -safe; disable only if needed:
 OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview --unsafe
+```
+
+Rename IDs in an existing tree only:
+
+```bash
+OrganPath RenameTree \
+  -i input.treefile \
+  -m id_map.txt \
+  -o renamed.treefile
 ```
