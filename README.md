@@ -77,6 +77,26 @@ OrganPath sortOrgan \
 - `animal_mt`: mitochondrial sorting with seed-start rotation for consistent coordinates.
 - `generic`: original contig-order behavior.
 
+Plant chloroplast single-IR mode (LSC + IR + SSC) with `cpstools`:
+
+```bash
+OrganPath sortOrgan \
+  -i getorgan_out \
+  -o sortorgan_out \
+  -s seed_pt.fa \
+  --organelle-mode plant_pt \
+  --pt-single-ir \
+  --pt-keep-ir auto \
+  --cpstools-bin cpstools \
+  --cpstools-args <your_cpstools_args_that_write_{cp_regions_tsv}> \
+  --min-identity 0.95 \
+  --min-len 1000
+```
+
+Notes:
+- You can skip running `cpstools` inside OrganPath by passing `--cp-regions cp_regions.tsv`.
+- `cp_regions.tsv` must include labels for `LSC`, `SSC`, and one of `IRB/IRA/IR`.
+
 Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)
 - `assembled_samples.fasta` (merged multifasta)

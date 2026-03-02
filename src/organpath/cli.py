@@ -826,6 +826,122 @@ def rotate_sequence_to_seed_start(seq: str, seed_seq: str, k: int = 80) -> Tuple
     return s_u, "anchor-not-found"
 
 
+def _normalize_region_name(token: str) -> Optional[str]:
+    t = token.strip().lower().replace("-", "").replace("_", "")
+    if not t:
+        return None
+    if "lsc" in t:
+        return "LSC"
+    if "ssc" in t:
+        return "SSC"
+    if "irb" in t or t == "ir2":
+        return "IRB"
+    if "ira" in t or t == "ir1":
+        return "IRA"
+    if t == "ir":
+        return "IR"
+    return None
+
+
+def parse_cp_regions_file(path: Path) -> Dict[str, Tuple[int, int]]:
+    regions: Dict[str, Tuple[int, int]] = {}
+    with path.open("rt") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = re.split(r"\s+", line)
+            name = None
+            for c in cols:
+                nm = _normalize_region_name(c)
+                if nm:
+                    name = nm
+                    break
+            if name is None:
+                continue
+            ints: List[int] = []
+            for c in cols:
+                try:
+                    ints.append(int(float(c)))
+                except ValueError:
+                    continue
+            if len(ints) < 2:
+                continue
+            regions[name] = (ints[0], ints[1])
+    if "IR" in regions:
+        regions.setdefault("IRB", regions["IR"])
+    need = {"LSC", "SSC"}
+    if not need.issubset(set(regions.keys())):
+        raise ValueError(f"cp regions file missing required labels (LSC/SSC): {path}")
+    if not any(x in regions for x in ("IRA", "IRB", "IR")):
+        raise ValueError(f"cp regions file missing IR label: {path}")
+    return regions
+
+
+def extract_circular_region(seq: str, start: int, end: int) -> str:
+    if not seq:
+        return ""
+    n = len(seq)
+    s = (start - 1) % n
+    e = (end - 1) % n
+    if s <= e:
+        return seq[s : e + 1]
+    return seq[s:] + seq[: e + 1]
+
+
+def reorder_cp_single_ir(seq: str, cp_regions: Dict[str, Tuple[int, int]], keep_ir: str) -> Tuple[str, str]:
+    lsc = extract_circular_region(seq, *cp_regions["LSC"])
+    ssc = extract_circular_region(seq, *cp_regions["SSC"])
+    keep = keep_ir.lower()
+    if keep == "ira" and "IRA" in cp_regions:
+        ir_name = "IRA"
+    elif keep == "irb" and "IRB" in cp_regions:
+        ir_name = "IRB"
+    else:
+        ir_name = "IRB" if "IRB" in cp_regions else ("IRA" if "IRA" in cp_regions else "IR")
+    ir = extract_circular_region(seq, *cp_regions[ir_name])
+    return lsc + ir + ssc, ir_name
+
+
+def resolve_cp_regions(
+    seed_fa: Path,
+    out_dir: Path,
+    cp_regions_path: Optional[str],
+    cpstools_bin: str,
+    cpstools_args: List[str],
+) -> Dict[str, Tuple[int, int]]:
+    if cp_regions_path:
+        return parse_cp_regions_file(Path(cp_regions_path).resolve())
+
+    cpstools = shutil.which(cpstools_bin)
+    if not cpstools:
+        raise RuntimeError(f"cpstools executable not found: {cpstools_bin}")
+    if not cpstools_args:
+        raise ValueError(
+            "plant_pt single-IR mode requires either --cp-regions or --cpstools-args. "
+            "Use placeholders: {seed_fasta} {cpstools_out} {cp_regions_tsv}."
+        )
+
+    cp_out = out_dir / "cpstools"
+    cp_out.mkdir(parents=True, exist_ok=True)
+    cp_regions_tsv = cp_out / "cp_regions.tsv"
+
+    rendered: List[str] = []
+    for x in cpstools_args:
+        rendered.append(
+            x.replace("{seed_fasta}", str(seed_fa))
+            .replace("{cpstools_out}", str(cp_out))
+            .replace("{cp_regions_tsv}", str(cp_regions_tsv))
+        )
+    run_command([cpstools] + rendered)
+    if not cp_regions_tsv.exists():
+        raise FileNotFoundError(
+            f"cpstools finished but expected region file not found: {cp_regions_tsv}. "
+            "Please ensure --cpstools-args writes regions to {cp_regions_tsv}."
+        )
+    return parse_cp_regions_file(cp_regions_tsv)
+
+
 def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
     contig = None
     for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
@@ -905,6 +1021,9 @@ def build_sample_assembly_from_contigs(
     aligner: str,
     organelle_mode: str = "generic",
     seed_seq: Optional[str] = None,
+    pt_single_ir: bool = False,
+    cp_regions: Optional[Dict[str, Tuple[int, int]]] = None,
+    pt_keep_ir: str = "auto",
 ) -> Tuple[str, int, int, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
@@ -976,6 +1095,9 @@ def build_sample_assembly_from_contigs(
     if organelle_mode in {"plant_pt", "animal_mt"} and seed_seq:
         merged, orient = rotate_sequence_to_seed_start(merged, seed_seq=seed_seq)
         note = f"rotated:{orient}"
+    if organelle_mode == "plant_pt" and pt_single_ir and cp_regions:
+        merged, ir_name = reorder_cp_single_ir(merged, cp_regions=cp_regions, keep_ir=pt_keep_ir)
+        note = f"{note};single_ir:{ir_name}" if note != "-" else f"single_ir:{ir_name}"
     out_fa = out_dir / f"{sample_name}.organellar.fasta"
     with out_fa.open("wt") as out:
         out.write(f">{sample_name}\n{merged}\n")
@@ -992,6 +1114,15 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"seed fasta not found: {seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
     seed_seq = read_primary_fasta_sequence(seed)
+    cp_regions: Optional[Dict[str, Tuple[int, int]]] = None
+    if args.organelle_mode == "plant_pt" and args.pt_single_ir:
+        cp_regions = resolve_cp_regions(
+            seed_fa=seed,
+            out_dir=out_dir,
+            cp_regions_path=args.cp_regions,
+            cpstools_bin=args.cpstools_bin,
+            cpstools_args=list(args.cpstools_args),
+        )
 
     sample_dirs = sorted([p for p in in_dir.iterdir() if p.is_dir()])
     if not sample_dirs:
@@ -1023,6 +1154,9 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     aligner=args.aligner,
                     organelle_mode=args.organelle_mode,
                     seed_seq=seed_seq,
+                    pt_single_ir=args.pt_single_ir,
+                    cp_regions=cp_regions,
+                    pt_keep_ir=args.pt_keep_ir,
                 )
                 seqs = read_fasta_sequences(Path(out_fa))
                 for sid, seq in seqs.items():
@@ -1293,6 +1427,11 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         seed=args.seed,
         aligner=args.aligner,
         organelle_mode="plant_pt",
+        pt_single_ir=args.pt_single_ir,
+        pt_keep_ir=args.pt_keep_ir,
+        cp_regions=args.cp_regions,
+        cpstools_bin=args.cpstools_bin,
+        cpstools_args=args.cpstools_args,
         min_identity=args.min_identity,
         min_len=args.min_len_pt,
         gap_n=args.gap_n,
@@ -1324,6 +1463,11 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         seed=args.seed,
         aligner=args.aligner,
         organelle_mode="plant_mt",
+        pt_single_ir=False,
+        pt_keep_ir="auto",
+        cp_regions=None,
+        cpstools_bin="cpstools",
+        cpstools_args=[],
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
@@ -1385,6 +1529,11 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         seed=args.seed,
         aligner=args.aligner,
         organelle_mode="animal_mt",
+        pt_single_ir=False,
+        pt_keep_ir="auto",
+        cp_regions=None,
+        cpstools_bin="cpstools",
+        cpstools_args=[],
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
@@ -1748,6 +1897,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["generic", "plant_pt", "plant_mt", "animal_mt"],
         help="Sorting strategy by organelle type",
     )
+    p_sort.add_argument("--pt-single-ir", action="store_true", help="Plant chloroplast mode: reorder as LSC+singleIR+SSC")
+    p_sort.add_argument(
+        "--pt-keep-ir",
+        default="auto",
+        choices=["auto", "ira", "irb"],
+        help="Which IR copy to keep for --pt-single-ir",
+    )
+    p_sort.add_argument("--cp-regions", help="Region table from cpstools (contains LSC/SSC/IR coordinates)")
+    p_sort.add_argument("--cpstools-bin", default="cpstools", help="cpstools executable name/path")
+    p_sort.add_argument(
+        "--cpstools-args",
+        nargs="*",
+        default=[],
+        help="Args passed to cpstools. Placeholders: {seed_fasta} {cpstools_out} {cp_regions_tsv}",
+    )
     p_sort.add_argument("--min-identity", type=float, default=0.95, help="Minimum alignment identity")
     p_sort.add_argument("--min-len", type=int, default=1000, help="Minimum aligned length")
     p_sort.add_argument("--gap-n", type=int, default=100, help="Number of Ns inserted between contigs")
@@ -1870,6 +2034,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
     p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection")
     p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_pt.add_argument("--pt-single-ir", action="store_true", help="Reorder chloroplast output to LSC+singleIR+SSC")
+    p_ch_pt.add_argument("--pt-keep-ir", default="auto", choices=["auto", "ira", "irb"], help="IR copy kept in single-IR mode")
+    p_ch_pt.add_argument("--cp-regions", help="Region table from cpstools (LSC/SSC/IR coordinates)")
+    p_ch_pt.add_argument("--cpstools-bin", default="cpstools", help="cpstools executable")
+    p_ch_pt.add_argument("--cpstools-args", nargs="*", default=[], help="Args passed to cpstools")
     p_ch_pt.set_defaults(func=cmd_channel_plant_pt)
 
     p_ch_mt = subs.add_parser(
