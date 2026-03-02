@@ -81,8 +81,8 @@ Three organelle channels:
 # Plant chloroplast channel
 OrganPath plant_pt -i reads_dir -o out_pt -s seed_pt.fa --jobs 5 --threads 16
 
-# Plant mitochondrial channel (with panman block route)
-OrganPath plant_mt -i reads_dir -o out_mt -s seed_mt.fa --jobs 5 --threads 16 --run-panman --run-ml
+# Plant mitochondrial channel (with panmanUtils block route)
+OrganPath plant_mt -i reads_dir -o out_mt -s seed_mt.fa --jobs 5 --threads 16 --run-panman --panman-bin panmanUtils --panman-args ...
 
 # Animal mitochondrial channel (simpler direct alignment route)
 OrganPath animal_mt -i reads_dir -o out_animal_mt -s seed_animal_mt.fa --jobs 5 --threads 16 --run-ml

@@ -1059,7 +1059,14 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         if not panman_bin:
             raise RuntimeError(f"panman executable not found: {args.panman_bin}")
         blocks_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [panman_bin, "-i", str(input_fa), "-o", str(blocks_dir)] + list(args.panman_args)
+        # panman ecosystem commonly exposes `panmanUtils` with its own CLI syntax.
+        # We therefore pass through user-provided args directly.
+        if not args.panman_args:
+            raise ValueError(
+                "--run-panman requires --panman-args for your panmanUtils workflow. "
+                "Please provide panmanUtils arguments that write block FASTA files into --blocks-dir."
+            )
+        cmd = [panman_bin] + list(args.panman_args)
         run_command(cmd)
 
     if not blocks_dir.exists():
@@ -1576,8 +1583,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_mt.add_argument("--blocks-dir", help="Directory containing block fasta files (if panman already run)")
     p_mt.add_argument("--run-panman", action="store_true", help="Run panman to generate blocks")
-    p_mt.add_argument("--panman-bin", default="panman", help="panman executable name/path")
-    p_mt.add_argument("--panman-args", nargs="*", default=[], help="Extra args passed to panman")
+    p_mt.add_argument("--panman-bin", default="panmanUtils", help="panman executable name/path")
+    p_mt.add_argument(
+        "--panman-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed directly to panmanUtils (must generate block FASTA files into --blocks-dir)",
+    )
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated supermatrix")
@@ -1630,8 +1642,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
     p_ch_mt.add_argument("--run-panman", action="store_true", help="Run panman to derive conserved blocks")
-    p_ch_mt.add_argument("--panman-bin", default="panman", help="panman executable")
-    p_ch_mt.add_argument("--panman-args", nargs="*", default=[], help="Extra args for panman")
+    p_ch_mt.add_argument("--panman-bin", default="panmanUtils", help="panman executable")
+    p_ch_mt.add_argument(
+        "--panman-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed directly to panmanUtils",
+    )
     p_ch_mt.add_argument("--blocks-dir", help="Existing panman blocks dir")
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
