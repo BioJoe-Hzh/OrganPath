@@ -878,6 +878,30 @@ def parse_cp_regions_file(path: Path) -> Dict[str, Tuple[int, int]]:
     return regions
 
 
+def parse_cpstools_four_sec(path: Path) -> Dict[str, Tuple[int, int]]:
+    txt = path.read_text()
+    regions: Dict[str, Tuple[int, int]] = {}
+    for m in re.finditer(r"(?i)\b(LSC|SSC|IRA|IRB|IR1|IR2|IR)\s*:\s*(\d+)\s*-\s*(\d+)", txt):
+        raw_name = m.group(1)
+        nm = _normalize_region_name(raw_name)
+        if nm is None:
+            continue
+        s = int(m.group(2))
+        e = int(m.group(3))
+        regions[nm] = (s, e)
+    if "IR" in regions:
+        regions.setdefault("IRB", regions["IR"])
+    if "IR1" in regions:
+        regions.setdefault("IRA", regions["IR1"])
+    if "IR2" in regions:
+        regions.setdefault("IRB", regions["IR2"])
+    if "LSC" not in regions or "SSC" not in regions:
+        raise ValueError(f"Failed to parse LSC/SSC from cpstools IR output: {path}")
+    if not any(x in regions for x in ("IRA", "IRB", "IR")):
+        raise ValueError(f"Failed to parse IR from cpstools IR output: {path}")
+    return regions
+
+
 def extract_circular_region(seq: str, start: int, end: int) -> str:
     if not seq:
         return ""
@@ -916,30 +940,64 @@ def resolve_cp_regions(
     cpstools = shutil.which(cpstools_bin)
     if not cpstools:
         raise RuntimeError(f"cpstools executable not found: {cpstools_bin}")
-    if not cpstools_args:
-        raise ValueError(
-            "plant_pt single-IR mode requires either --cp-regions or --cpstools-args. "
-            "Use placeholders: {seed_fasta} {cpstools_out} {cp_regions_tsv}."
-        )
 
     cp_out = out_dir / "cpstools"
     cp_out.mkdir(parents=True, exist_ok=True)
     cp_regions_tsv = cp_out / "cp_regions.tsv"
 
-    rendered: List[str] = []
-    for x in cpstools_args:
-        rendered.append(
-            x.replace("{seed_fasta}", str(seed_fa))
-            .replace("{cpstools_out}", str(cp_out))
-            .replace("{cp_regions_tsv}", str(cp_regions_tsv))
-        )
-    run_command([cpstools] + rendered)
-    if not cp_regions_tsv.exists():
-        raise FileNotFoundError(
-            f"cpstools finished but expected region file not found: {cp_regions_tsv}. "
-            "Please ensure --cpstools-args writes regions to {cp_regions_tsv}."
-        )
-    return parse_cp_regions_file(cp_regions_tsv)
+    if cpstools_args:
+        rendered: List[str] = []
+        for x in cpstools_args:
+            rendered.append(
+                x.replace("{seed_fasta}", str(seed_fa))
+                .replace("{cpstools_out}", str(cp_out))
+                .replace("{cp_regions_tsv}", str(cp_regions_tsv))
+            )
+        run_command([cpstools] + rendered)
+        if not cp_regions_tsv.exists():
+            raise FileNotFoundError(
+                f"cpstools finished but expected region file not found: {cp_regions_tsv}. "
+                "Please ensure --cpstools-args writes regions to {cp_regions_tsv}."
+            )
+        return parse_cp_regions_file(cp_regions_tsv)
+
+    # Default cpstools workflow: IR(seed) -> Seq -m LSC -> IR(LSC_adjusted)
+    four_sec_1 = cp_out / "seed.four_sec.txt"
+    with four_sec_1.open("wt") as out:
+        subprocess.run([cpstools, "IR", "-i", str(seed_fa)], stdout=out, check=True)
+
+    tmp_dir = cp_out / "cpstools_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    link_path = tmp_dir / seed_fa.name
+    try:
+        if not link_path.exists():
+            link_path.symlink_to(seed_fa)
+    except Exception:
+        shutil.copy2(seed_fa, link_path)
+
+    subprocess.run(
+        [cpstools, "Seq", "-d", str(tmp_dir), "-f", str(four_sec_1), "-m", "LSC"],
+        check=True,
+        cwd=str(cp_out),
+    )
+    lsc_adj_dir = cp_out / "LSC_adj"
+    lsc_candidates = sorted(lsc_adj_dir.glob("*.fa")) + sorted(lsc_adj_dir.glob("*.fasta"))
+    if not lsc_candidates:
+        raise FileNotFoundError(f"cpstools Seq did not produce LSC-adjusted fasta in: {lsc_adj_dir}")
+    lsc_seed = lsc_candidates[0]
+
+    four_sec_2 = cp_out / "lsc_start.four_sec.txt"
+    with four_sec_2.open("wt") as out:
+        subprocess.run([cpstools, "IR", "-i", str(lsc_seed)], stdout=out, check=True)
+
+    regions = parse_cpstools_four_sec(four_sec_2)
+    with cp_regions_tsv.open("wt") as out:
+        out.write("region\tstart\tend\n")
+        for k in ("LSC", "IRB", "IRA", "SSC"):
+            if k in regions:
+                s, e = regions[k]
+                out.write(f"{k}\t{s}\t{e}\n")
+    return regions
 
 
 def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:

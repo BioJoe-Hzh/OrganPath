@@ -88,12 +88,14 @@ OrganPath sortOrgan \
   --pt-single-ir \
   --pt-keep-ir auto \
   --cpstools-bin cpstools \
-  --cpstools-args <your_cpstools_args_that_write_{cp_regions_tsv}> \
   --min-identity 0.95 \
   --min-len 1000
 ```
 
 Notes:
+- If `--cpstools-args` is not provided, OrganPath now runs a built-in default workflow:
+  `cpstools IR -> cpstools Seq -m LSC -> cpstools IR`
+  and auto-generates `cp_regions.tsv`.
 - You can skip running `cpstools` inside OrganPath by passing `--cp-regions cp_regions.tsv`.
 - `cp_regions.tsv` must include labels for `LSC`, `SSC`, and one of `IRB/IRA/IR`.
 
