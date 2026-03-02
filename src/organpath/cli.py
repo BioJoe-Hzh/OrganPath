@@ -1053,13 +1053,16 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     if not input_fa.exists():
         raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
 
+    pangraph_out = out_dir / "pangraph"
     dipper_out = out_dir / "dipper"
     twilight_out = out_dir / "twilight"
     panman_out = out_dir / "panman_run"
+    pangraph_out.mkdir(parents=True, exist_ok=True)
     dipper_out.mkdir(parents=True, exist_ok=True)
     twilight_out.mkdir(parents=True, exist_ok=True)
     panman_out.mkdir(parents=True, exist_ok=True)
 
+    pangraph_json = Path(args.pangraph_json).resolve() if args.pangraph_json else (pangraph_out / "pangraph_output.json")
     aln_fa = Path(args.aln_file).resolve() if args.aln_file else input_fa
     guide_tree = Path(args.guide_tree).resolve() if args.guide_tree else (twilight_out / "guide_tree.nwk")
     dipper_graph = Path(args.dipper_graph).resolve() if args.dipper_graph else (dipper_out / "graph.gfa")
@@ -1069,6 +1072,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         for x in items:
             rendered.append(
                 x.replace("{input_fasta}", str(input_fa))
+                .replace("{pangraph_out}", str(pangraph_out))
+                .replace("{pangraph_json}", str(pangraph_json))
                 .replace("{dipper_out}", str(dipper_out))
                 .replace("{twilight_out}", str(twilight_out))
                 .replace("{dipper_graph}", str(dipper_graph))
@@ -1077,6 +1082,17 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                 .replace("{panman_out}", str(panman_out))
             )
         return rendered
+
+    if args.run_pangraph:
+        pangraph_bin = shutil.which(args.pangraph_bin)
+        if not pangraph_bin:
+            raise RuntimeError(f"PanGraph executable not found: {args.pangraph_bin}")
+        if not args.pangraph_args:
+            raise ValueError(
+                "--run-pangraph requires --pangraph-args. "
+                "Use placeholders like {input_fasta}, {pangraph_out}, {pangraph_json}."
+            )
+        run_command([pangraph_bin] + _render_tokens(list(args.pangraph_args)))
 
     if args.run_dipper:
         dipper_bin = shutil.which(args.dipper_bin)
@@ -1222,6 +1238,10 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
     ms = argparse.Namespace(
         input=str((Path(args.outdir).resolve() / "sortOrgan" / "assembled_samples.fasta")),
         outdir=str((Path(args.outdir).resolve() / "mtBlocks")),
+        run_pangraph=args.run_pangraph,
+        pangraph_bin=args.pangraph_bin,
+        pangraph_args=args.pangraph_args,
+        pangraph_json=args.pangraph_json,
         aln_file=args.aln_file,
         guide_tree=args.guide_tree,
         dipper_graph=args.dipper_graph,
@@ -1637,6 +1657,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mt.add_argument("-i", "--input", required=True, help="Input multifasta (per-sample mt assemblies)")
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
+    p_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
+    p_mt.add_argument(
+        "--pangraph-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to PanGraph. Supports placeholders: {input_fasta} {pangraph_out} {pangraph_json}",
+    )
+    p_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
     p_mt.add_argument("--aln-file", help="Existing MSA fasta (if already generated)")
     p_mt.add_argument("--guide-tree", help="Existing guide tree nwk (if already generated)")
     p_mt.add_argument("--dipper-graph", help="Expected dipper graph path (for twilight/panman)")
@@ -1716,6 +1745,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
+    p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
+    p_ch_mt.add_argument("--pangraph-args", nargs="*", default=[], help="Arguments passed to PanGraph")
+    p_ch_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON for mtBlocks")
     p_ch_mt.add_argument("--run-panman", action="store_true", help="Run panman to derive conserved blocks")
     p_ch_mt.add_argument("--aln-file", help="Existing MSA fasta for mtBlocks")
     p_ch_mt.add_argument("--guide-tree", help="Existing guide tree nwk for mtBlocks")
