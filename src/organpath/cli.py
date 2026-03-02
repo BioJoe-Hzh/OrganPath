@@ -1053,6 +1053,53 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     if not input_fa.exists():
         raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
 
+    dipper_out = out_dir / "dipper"
+    twilight_out = out_dir / "twilight"
+    panman_out = out_dir / "panman_run"
+    dipper_out.mkdir(parents=True, exist_ok=True)
+    twilight_out.mkdir(parents=True, exist_ok=True)
+    panman_out.mkdir(parents=True, exist_ok=True)
+
+    aln_fa = Path(args.aln_file).resolve() if args.aln_file else input_fa
+    guide_tree = Path(args.guide_tree).resolve() if args.guide_tree else (twilight_out / "guide_tree.nwk")
+    dipper_graph = Path(args.dipper_graph).resolve() if args.dipper_graph else (dipper_out / "graph.gfa")
+
+    def _render_tokens(items: List[str]) -> List[str]:
+        rendered: List[str] = []
+        for x in items:
+            rendered.append(
+                x.replace("{input_fasta}", str(input_fa))
+                .replace("{dipper_out}", str(dipper_out))
+                .replace("{twilight_out}", str(twilight_out))
+                .replace("{dipper_graph}", str(dipper_graph))
+                .replace("{aln_fasta}", str(aln_fa))
+                .replace("{guide_tree}", str(guide_tree))
+                .replace("{panman_out}", str(panman_out))
+            )
+        return rendered
+
+    if args.run_dipper:
+        dipper_bin = shutil.which(args.dipper_bin)
+        if not dipper_bin:
+            raise RuntimeError(f"DIPPER executable not found: {args.dipper_bin}")
+        if not args.dipper_args:
+            raise ValueError(
+                "--run-dipper requires --dipper-args. "
+                "Use placeholders like {input_fasta}, {dipper_out}, {dipper_graph}, {aln_fasta}."
+            )
+        run_command([dipper_bin] + _render_tokens(list(args.dipper_args)))
+
+    if args.run_twilight:
+        twilight_bin = shutil.which(args.twilight_bin)
+        if not twilight_bin:
+            raise RuntimeError(f"TWILIGHT executable not found: {args.twilight_bin}")
+        if not args.twilight_args:
+            raise ValueError(
+                "--run-twilight requires --twilight-args. "
+                "Use placeholders like {dipper_graph}, {aln_fasta}, {twilight_out}, {guide_tree}."
+            )
+        run_command([twilight_bin] + _render_tokens(list(args.twilight_args)))
+
     blocks_dir = Path(args.blocks_dir).resolve() if args.blocks_dir else (out_dir / "panman_blocks")
     if args.run_panman:
         panman_bin = shutil.which(args.panman_bin)
@@ -1066,7 +1113,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                 "--run-panman requires --panman-args for your panmanUtils workflow. "
                 "Please provide panmanUtils arguments that write block FASTA files into --blocks-dir."
             )
-        cmd = [panman_bin] + list(args.panman_args)
+        cmd = [panman_bin] + _render_tokens(list(args.panman_args))
         run_command(cmd)
 
     if not blocks_dir.exists():
@@ -1175,6 +1222,15 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
     ms = argparse.Namespace(
         input=str((Path(args.outdir).resolve() / "sortOrgan" / "assembled_samples.fasta")),
         outdir=str((Path(args.outdir).resolve() / "mtBlocks")),
+        aln_file=args.aln_file,
+        guide_tree=args.guide_tree,
+        dipper_graph=args.dipper_graph,
+        run_dipper=args.run_dipper,
+        dipper_bin=args.dipper_bin,
+        dipper_args=args.dipper_args,
+        run_twilight=args.run_twilight,
+        twilight_bin=args.twilight_bin,
+        twilight_args=args.twilight_args,
         blocks_dir=args.blocks_dir,
         run_panman=args.run_panman,
         panman_bin=args.panman_bin,
@@ -1581,6 +1637,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mt.add_argument("-i", "--input", required=True, help="Input multifasta (per-sample mt assemblies)")
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_mt.add_argument("--aln-file", help="Existing MSA fasta (if already generated)")
+    p_mt.add_argument("--guide-tree", help="Existing guide tree nwk (if already generated)")
+    p_mt.add_argument("--dipper-graph", help="Expected dipper graph path (for twilight/panman)")
+    p_mt.add_argument("--run-dipper", action="store_true", help="Run DIPPER to produce graph/MSA")
+    p_mt.add_argument("--dipper-bin", default="dipper", help="DIPPER executable name/path")
+    p_mt.add_argument(
+        "--dipper-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to DIPPER. Supports placeholders: {input_fasta} {dipper_out} {dipper_graph} {aln_fasta}",
+    )
+    p_mt.add_argument("--run-twilight", action="store_true", help="Run TWILIGHT to produce guide tree")
+    p_mt.add_argument("--twilight-bin", default="twilight", help="TWILIGHT executable name/path")
+    p_mt.add_argument(
+        "--twilight-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to TWILIGHT. Supports placeholders: {dipper_graph} {aln_fasta} {twilight_out} {guide_tree}",
+    )
     p_mt.add_argument("--blocks-dir", help="Directory containing block fasta files (if panman already run)")
     p_mt.add_argument("--run-panman", action="store_true", help="Run panman to generate blocks")
     p_mt.add_argument("--panman-bin", default="panmanUtils", help="panman executable name/path")
@@ -1642,6 +1717,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
     p_ch_mt.add_argument("--run-panman", action="store_true", help="Run panman to derive conserved blocks")
+    p_ch_mt.add_argument("--aln-file", help="Existing MSA fasta for mtBlocks")
+    p_ch_mt.add_argument("--guide-tree", help="Existing guide tree nwk for mtBlocks")
+    p_ch_mt.add_argument("--dipper-graph", help="Expected dipper graph path")
+    p_ch_mt.add_argument("--run-dipper", action="store_true", help="Run DIPPER before TWILIGHT/panman")
+    p_ch_mt.add_argument("--dipper-bin", default="dipper", help="DIPPER executable")
+    p_ch_mt.add_argument("--dipper-args", nargs="*", default=[], help="Arguments passed to DIPPER")
+    p_ch_mt.add_argument("--run-twilight", action="store_true", help="Run TWILIGHT to generate guide tree")
+    p_ch_mt.add_argument("--twilight-bin", default="twilight", help="TWILIGHT executable")
+    p_ch_mt.add_argument("--twilight-args", nargs="*", default=[], help="Arguments passed to TWILIGHT")
     p_ch_mt.add_argument("--panman-bin", default="panmanUtils", help="panman executable")
     p_ch_mt.add_argument(
         "--panman-args",

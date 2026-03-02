@@ -81,8 +81,19 @@ Three organelle channels:
 # Plant chloroplast channel
 OrganPath plant_pt -i reads_dir -o out_pt -s seed_pt.fa --jobs 5 --threads 16
 
-# Plant mitochondrial channel (with panmanUtils block route)
-OrganPath plant_mt -i reads_dir -o out_mt -s seed_mt.fa --jobs 5 --threads 16 --run-panman --panman-bin panmanUtils --panman-args ...
+# Plant mitochondrial channel (DIPPER -> TWILIGHT -> panmanUtils -> blocks)
+OrganPath plant_mt \
+  -i reads_dir \
+  -o out_mt \
+  -s seed_mt.fa \
+  --jobs 5 \
+  --threads 16 \
+  --run-dipper \
+  --dipper-args <DIPPER_ARGS...> \
+  --run-twilight \
+  --twilight-args <TWILIGHT_ARGS...> \
+  --run-panman \
+  --panman-args <PANMAN_ARGS...>
 
 # Animal mitochondrial channel (simpler direct alignment route)
 OrganPath animal_mt -i reads_dir -o out_animal_mt -s seed_animal_mt.fa --jobs 5 --threads 16 --run-ml
@@ -138,3 +149,35 @@ OrganPath RenameTree \
   -m id_map.txt \
   -o renamed.treefile
 ```
+
+## Plant mtBlocks Workflow
+
+`mtBlocks` now supports this order:
+1. DIPPER: build graph and/or MSA from input multifasta
+2. TWILIGHT: build guide tree
+3. panmanUtils: derive homologous local blocks
+4. per-block `mafft` + `trimal`
+5. concatenate all kept blocks to `mt_supermatrix.fasta` (`mt_partitions.txt`)
+
+Example:
+
+```bash
+OrganPath mtBlocks \
+  -i out_mt/sortOrgan/assembled_samples.fasta \
+  -o out_mt/mtBlocks \
+  --run-dipper \
+  --dipper-args <DIPPER_ARGS...> \
+  --run-twilight \
+  --twilight-args <TWILIGHT_ARGS...> \
+  --run-panman \
+  --panman-args <PANMAN_ARGS...>
+```
+
+Argument placeholders supported in `--dipper-args/--twilight-args/--panman-args`:
+- `{input_fasta}`: input multifasta
+- `{dipper_out}`: DIPPER working directory
+- `{dipper_graph}`: expected graph path (default: `dipper/graph.gfa`)
+- `{aln_fasta}`: alignment file used downstream
+- `{twilight_out}`: TWILIGHT working directory
+- `{guide_tree}`: guide tree path (default: `twilight/guide_tree.nwk`)
+- `{panman_out}`: panman working directory
