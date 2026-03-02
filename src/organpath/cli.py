@@ -627,6 +627,364 @@ def run_popart_cli(popart_bin: str, popart_input: Path, out_dir: Path, extra_arg
     run_command(cmd)
 
 
+def discover_paired_reads(reads_dir: Path, r1_suffix: str, r2_suffix: str) -> Tuple[List[Tuple[str, Path, Path]], List[str]]:
+    pairs: List[Tuple[str, Path, Path]] = []
+    missing: List[str] = []
+    for r1 in sorted(reads_dir.glob(f"*{r1_suffix}")):
+        name = r1.name
+        if not name.endswith(r1_suffix):
+            continue
+        sample = name[: -len(r1_suffix)]
+        r2 = reads_dir / f"{sample}{r2_suffix}"
+        if not r2.exists():
+            missing.append(sample)
+            continue
+        pairs.append((sample, r1, r2))
+    return pairs, missing
+
+
+def run_getorgan_one_sample(
+    go_bin: str,
+    sample: str,
+    r1: Path,
+    r2: Path,
+    seed: Path,
+    out_dir: Path,
+    organelle_type: str,
+    threads: int,
+    rounds: int,
+    kmer: str,
+    max_reads: int,
+    extra_args: List[str],
+) -> Tuple[str, str, str]:
+    sample_out = out_dir / sample
+    sample_out.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        go_bin,
+        "-1",
+        str(r1),
+        "-2",
+        str(r2),
+        "-o",
+        str(sample_out),
+        "-F",
+        organelle_type,
+        "-s",
+        str(seed),
+        "-t",
+        str(threads),
+        "-R",
+        str(rounds),
+    ]
+    if kmer:
+        cmd += ["-k", kmer]
+    if max_reads is not None and max_reads > 0:
+        cmd += ["-n", str(max_reads)]
+    if extra_args:
+        cmd += extra_args
+
+    try:
+        run_command(cmd)
+        return sample, "OK", "-"
+    except subprocess.CalledProcessError as exc:
+        return sample, "FAIL", str(exc.returncode)
+    except Exception as exc:
+        return sample, "FAIL", str(exc)
+
+
+def cmd_get_organ(args: argparse.Namespace) -> int:
+    reads_dir = Path(args.reads_dir).resolve()
+    out_dir = Path(args.outdir).resolve()
+    seed = Path(args.seed).resolve()
+    if not reads_dir.exists():
+        raise FileNotFoundError(f"reads-dir not found: {reads_dir}")
+    if not seed.exists():
+        raise FileNotFoundError(f"seed fasta not found: {seed}")
+
+    go_bin = shutil.which(args.getorganelle_bin)
+    if not go_bin:
+        raise RuntimeError(f"GetOrganelle executable not found: {args.getorganelle_bin}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pairs, missing = discover_paired_reads(reads_dir, args.r1_suffix, args.r2_suffix)
+    if not pairs:
+        raise ValueError("No paired-end samples discovered with given suffixes.")
+    if missing:
+        logger.warning("Missing R2 for %d samples; skipped.", len(missing))
+
+    summary = out_dir / "getorgan_summary.tsv"
+    pair_map = {sample: (r1, r2) for sample, r1, r2 in pairs}
+    results: List[Tuple[str, str, str]] = []
+
+    jobs = max(1, int(args.jobs))
+    workers = min(jobs, len(pairs))
+    logger.info("Running GetOrganelle with %d parallel samples; %d threads per sample.", workers, args.threads)
+
+    if workers == 1:
+        for sample, r1, r2 in pairs:
+            results.append(
+                run_getorgan_one_sample(
+                    go_bin=go_bin,
+                    sample=sample,
+                    r1=r1,
+                    r2=r2,
+                    seed=seed,
+                    out_dir=out_dir,
+                    organelle_type=args.organelle_type,
+                    threads=args.threads,
+                    rounds=args.rounds,
+                    kmer=args.kmer,
+                    max_reads=args.max_reads,
+                    extra_args=args.extra_args,
+                )
+            )
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = []
+            for sample, r1, r2 in pairs:
+                futs.append(
+                    ex.submit(
+                        run_getorgan_one_sample,
+                        go_bin,
+                        sample,
+                        r1,
+                        r2,
+                        seed,
+                        out_dir,
+                        args.organelle_type,
+                        args.threads,
+                        args.rounds,
+                        args.kmer,
+                        args.max_reads,
+                        args.extra_args,
+                    )
+                )
+            for fut in concurrent.futures.as_completed(futs):
+                results.append(fut.result())
+
+    with summary.open("wt") as out:
+        out.write("sample\tr1\tr2\tstatus\tmessage\n")
+        for sample, status, msg in sorted(results, key=lambda x: x[0]):
+            r1, r2 = pair_map[sample]
+            out.write(f"{sample}\t{r1}\t{r2}\t{status}\t{msg}\n")
+
+    if missing:
+        with (out_dir / "missing_pairs.txt").open("wt") as f:
+            f.write("\n".join(missing) + "\n")
+    logger.info("getOrgan completed. Summary: %s", summary)
+    return 0
+
+
+def reverse_complement(seq: str) -> str:
+    table = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+    return seq.translate(table)[::-1]
+
+
+def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    contig = None
+    for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
+        cands = sorted(sample_dir.rglob(pat))
+        if cands:
+            contig = cands[0]
+            break
+    fastg_cands = sorted(sample_dir.rglob("*.fastg"))
+    fastg = fastg_cands[0] if fastg_cands else None
+    return contig, fastg
+
+
+def parse_minimap2_paf(paf_path: Path, min_identity: float, min_len: int) -> List[Tuple[str, int, int, str, float, int]]:
+    hits: List[Tuple[str, int, int, str, float, int]] = []
+    with paf_path.open("rt") as fh:
+        for raw in fh:
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) < 12:
+                continue
+            qname = parts[0]
+            strand = parts[4]
+            tstart = int(parts[7])
+            tend = int(parts[8])
+            nmatch = int(parts[9])
+            alen = int(parts[10])
+            if alen <= 0:
+                continue
+            ident = nmatch / alen
+            if ident < min_identity or alen < min_len:
+                continue
+            hits.append((qname, tstart, tend, strand, ident, alen))
+    return hits
+
+
+def parse_blast_tab(tab_path: Path, min_identity: float, min_len: int) -> List[Tuple[str, int, int, str, float, int]]:
+    hits: List[Tuple[str, int, int, str, float, int]] = []
+    with tab_path.open("rt") as fh:
+        for raw in fh:
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) < 8:
+                continue
+            qname = parts[0]
+            sstart = int(parts[1])
+            send = int(parts[2])
+            alen = int(parts[3])
+            pident = float(parts[4]) / 100.0
+            strand = "+" if sstart <= send else "-"
+            if pident < min_identity or alen < min_len:
+                continue
+            hits.append((qname, min(sstart, send), max(sstart, send), strand, pident, alen))
+    return hits
+
+
+def choose_best_hits(hits: List[Tuple[str, int, int, str, float, int]]) -> List[Tuple[str, int, int, str, float, int]]:
+    best: Dict[str, Tuple[str, int, int, str, float, int]] = {}
+    for h in hits:
+        qname = h[0]
+        if qname not in best:
+            best[qname] = h
+            continue
+        old = best[qname]
+        if (h[4], h[5]) > (old[4], old[5]):
+            best[qname] = h
+    selected = list(best.values())
+    selected.sort(key=lambda x: (x[1], x[2]))
+    return selected
+
+
+def build_sample_assembly_from_contigs(
+    contig_fa: Path,
+    seed_fa: Path,
+    sample_name: str,
+    out_dir: Path,
+    min_identity: float,
+    min_len: int,
+    gap_n: int,
+    aligner: str,
+) -> Tuple[str, int, int]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    contigs = read_fasta_sequences(contig_fa)
+    if not contigs:
+        raise ValueError(f"No contigs found in {contig_fa}")
+
+    tool = aligner
+    if tool == "auto":
+        tool = "minimap2" if shutil.which("minimap2") else "blastn"
+
+    tmp = out_dir / f"{sample_name}.align.tmp"
+    if tool == "minimap2":
+        if not shutil.which("minimap2"):
+            raise RuntimeError("minimap2 not found in PATH.")
+        with tmp.open("wt") as out:
+            subprocess.run(
+                ["minimap2", "-x", "asm5", str(seed_fa), str(contig_fa)],
+                stdout=out,
+                check=True,
+            )
+        hits = parse_minimap2_paf(tmp, min_identity=min_identity, min_len=min_len)
+    elif tool == "blastn":
+        if not shutil.which("blastn"):
+            raise RuntimeError("blastn not found in PATH.")
+        with tmp.open("wt") as out:
+            subprocess.run(
+                [
+                    "blastn",
+                    "-query",
+                    str(contig_fa),
+                    "-subject",
+                    str(seed_fa),
+                    "-outfmt",
+                    "6 qseqid sstart send length pident bitscore qstart qend",
+                ],
+                stdout=out,
+                check=True,
+            )
+        hits = parse_blast_tab(tmp, min_identity=min_identity, min_len=min_len)
+    else:
+        raise ValueError(f"Unsupported aligner: {aligner}")
+
+    try:
+        tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    chosen = choose_best_hits(hits)
+    if not chosen:
+        raise ValueError("No contigs passed identity/length filter against seed.")
+
+    n_gap = "N" * gap_n
+    seq_parts: List[str] = []
+    kept = 0
+    with (out_dir / f"{sample_name}.selected_contigs.tsv").open("wt") as tab:
+        tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\n")
+        for contig_id, sstart, send, strand, ident, alen in chosen:
+            if contig_id not in contigs:
+                continue
+            cseq = contigs[contig_id]
+            if strand == "-":
+                cseq = reverse_complement(cseq)
+            seq_parts.append(cseq)
+            tab.write(f"{contig_id}\t{sstart}\t{send}\t{strand}\t{ident:.4f}\t{alen}\n")
+            kept += 1
+
+    merged = n_gap.join(seq_parts)
+    out_fa = out_dir / f"{sample_name}.organellar.fasta"
+    with out_fa.open("wt") as out:
+        out.write(f">{sample_name}\n{merged}\n")
+    return str(out_fa), kept, len(merged)
+
+
+def cmd_sort_organ(args: argparse.Namespace) -> int:
+    in_dir = Path(args.input_dir).resolve()
+    out_dir = Path(args.outdir).resolve()
+    seed = Path(args.seed).resolve()
+    if not in_dir.exists():
+        raise FileNotFoundError(f"input-dir not found: {in_dir}")
+    if not seed.exists():
+        raise FileNotFoundError(f"seed fasta not found: {seed}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    sample_dirs = sorted([p for p in in_dir.iterdir() if p.is_dir()])
+    if not sample_dirs:
+        raise ValueError("No sample folders found in input-dir.")
+
+    summary = out_dir / "sortorgan_summary.tsv"
+    all_multi = out_dir / "assembled_samples.fasta"
+    with summary.open("wt") as sumf, all_multi.open("wt") as mf:
+        sumf.write(
+            "sample\tstatus\tcontigs_fasta\tfastg\tselected_contigs\tassembled_len\tassembled_fasta\tmessage\n"
+        )
+        for sdir in sample_dirs:
+            sample = sdir.name
+            contig, fastg = pick_sample_contig_and_fastg(sdir)
+            if contig is None:
+                sumf.write(f"{sample}\tFAIL\t-\t{fastg or '-'}\t0\t0\t-\tcontigs not found\n")
+                continue
+
+            sample_out = out_dir / sample
+            try:
+                out_fa, nsel, alen = build_sample_assembly_from_contigs(
+                    contig_fa=contig,
+                    seed_fa=seed,
+                    sample_name=sample,
+                    out_dir=sample_out,
+                    min_identity=args.min_identity,
+                    min_len=args.min_len,
+                    gap_n=args.gap_n,
+                    aligner=args.aligner,
+                )
+                seqs = read_fasta_sequences(Path(out_fa))
+                for sid, seq in seqs.items():
+                    mf.write(f">{sid}\n{seq}\n")
+                sumf.write(
+                    f"{sample}\tOK\t{contig}\t{fastg or '-'}\t{nsel}\t{alen}\t{out_fa}\t-\n"
+                )
+            except Exception as exc:
+                sumf.write(
+                    f"{sample}\tFAIL\t{contig}\t{fastg or '-'}\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
+                )
+
+    logger.info("sortOrgan completed. Summary: %s", summary)
+    logger.info("Merged multi-fasta: %s", all_multi)
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.outdir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -917,6 +1275,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_rename.add_argument("-m", "--id-map", required=True, help="Two-column id_map/pop file")
     p_rename.add_argument("-o", "--output", required=True, help="Output Newick tree file")
     p_rename.set_defaults(func=cmd_rename_tree)
+
+    p_get = subs.add_parser(
+        "getOrgan",
+        help="Batch assemble organellar genomes from paired-end reads with GetOrganelle",
+    )
+    p_get.add_argument("-i", "--reads-dir", required=True, help="Folder containing raw paired-end reads")
+    p_get.add_argument("-o", "--outdir", required=True, help="Output folder for per-sample GetOrganelle results")
+    p_get.add_argument("-s", "--seed", required=True, help="Seed fasta sequence for GetOrganelle")
+    p_get.add_argument("--r1-suffix", default="_1.fastq.gz", help="R1 filename suffix")
+    p_get.add_argument("--r2-suffix", default="_2.fastq.gz", help="R2 filename suffix")
+    p_get.add_argument(
+        "--organelle-type",
+        default="embplant_pt",
+        choices=["embplant_pt", "embplant_mt", "animal_mt", "fungus_mt", "other_pt", "other_mt"],
+        help="GetOrganelle database type (-F)",
+    )
+    p_get.add_argument("--jobs", type=int, default=1, help="Number of samples assembled in parallel")
+    p_get.add_argument("--threads", type=int, default=8, help="Threads per sample")
+    p_get.add_argument("--rounds", type=int, default=15, help="GetOrganelle extension rounds (-R)")
+    p_get.add_argument("--kmer", default="", help="Custom kmers for GetOrganelle, e.g. 21,45,65,85,105")
+    p_get.add_argument("--max-reads", type=int, default=0, help="Optional max reads for GetOrganelle (-n)")
+    p_get.add_argument(
+        "--getorganelle-bin",
+        default="get_organelle_from_reads.py",
+        help="GetOrganelle executable name/path",
+    )
+    p_get.add_argument("--extra-args", nargs="*", default=[], help="Extra args passed to GetOrganelle")
+    p_get.set_defaults(func=cmd_get_organ)
+
+    p_sort = subs.add_parser(
+        "sortOrgan",
+        help="Sort and orient assembled organellar contigs by seed; output per-sample fasta",
+    )
+    p_sort.add_argument("-i", "--input-dir", required=True, help="Input folder from OrganPath getOrgan outputs")
+    p_sort.add_argument("-o", "--outdir", required=True, help="Output folder for sorted assemblies")
+    p_sort.add_argument("-s", "--seed", required=True, help="Seed/reference fasta used for contig ordering")
+    p_sort.add_argument(
+        "--aligner",
+        default="auto",
+        choices=["auto", "minimap2", "blastn"],
+        help="Aligner for contig-to-seed mapping",
+    )
+    p_sort.add_argument("--min-identity", type=float, default=0.95, help="Minimum alignment identity")
+    p_sort.add_argument("--min-len", type=int, default=1000, help="Minimum aligned length")
+    p_sort.add_argument("--gap-n", type=int, default=100, help="Number of Ns inserted between contigs")
+    p_sort.set_defaults(func=cmd_sort_organ)
 
     p_chk = subs.add_parser("check", help="Check runtime environment and external tools")
     p_chk.set_defaults(func=cmd_check)

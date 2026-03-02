@@ -45,6 +45,36 @@ organpath check
 
 ## Usage
 
+Step 1: Batch organelle assembly with GetOrganelle:
+
+```bash
+OrganPath getOrgan \
+  -i reads_dir \
+  -o getorgan_out \
+  -s seed.fa \
+  --r1-suffix _1.fastq.gz \
+  --r2-suffix _2.fastq.gz \
+  --organelle-type embplant_pt \
+  --jobs 5 \
+  --threads 16
+```
+
+Step 2: Sort/orient assembled contigs and build per-sample fasta:
+
+```bash
+OrganPath sortOrgan \
+  -i getorgan_out \
+  -o sortorgan_out \
+  -s seed.fa \
+  --min-identity 0.95 \
+  --min-len 1000
+```
+
+Outputs:
+- `sortorgan_summary.tsv` (per-sample summary)
+- `assembled_samples.fasta` (merged multifasta)
+- per-sample `*.organellar.fasta`
+
 ```bash
 OrganPath run \
   -v input.vcf.gz \
