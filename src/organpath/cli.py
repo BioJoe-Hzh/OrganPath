@@ -1046,13 +1046,7 @@ def concatenate_blocks(trimmed_blocks: List[Path], out_fa: Path, out_partitions:
             out.write(f">{s}\n{''.join(concat)}\n")
 
 
-def cmd_mt_blocks(args: argparse.Namespace) -> int:
-    input_fa = Path(args.input).resolve()
-    out_dir = Path(args.outdir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if not input_fa.exists():
-        raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
-
+def run_panman_pipeline(args: argparse.Namespace, input_fa: Path, out_dir: Path, strict_args: bool) -> Dict[str, Path]:
     pangraph_out = out_dir / "pangraph"
     dipper_out = out_dir / "dipper"
     twilight_out = out_dir / "twilight"
@@ -1066,6 +1060,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     aln_fa = Path(args.aln_file).resolve() if args.aln_file else input_fa
     guide_tree = Path(args.guide_tree).resolve() if args.guide_tree else (twilight_out / "guide_tree.nwk")
     dipper_graph = Path(args.dipper_graph).resolve() if args.dipper_graph else (dipper_out / "graph.gfa")
+    panman_file = panman_out / "result.panman"
 
     def _render_tokens(items: List[str]) -> List[str]:
         rendered: List[str] = []
@@ -1080,6 +1075,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                 .replace("{aln_fasta}", str(aln_fa))
                 .replace("{guide_tree}", str(guide_tree))
                 .replace("{panman_out}", str(panman_out))
+                .replace("{panman_file}", str(panman_file))
             )
         return rendered
 
@@ -1088,33 +1084,47 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         if not pangraph_bin:
             raise RuntimeError(f"PanGraph executable not found: {args.pangraph_bin}")
         if not args.pangraph_args:
-            raise ValueError(
-                "--run-pangraph requires --pangraph-args. "
-                "Use placeholders like {input_fasta}, {pangraph_out}, {pangraph_json}."
+            if strict_args:
+                raise ValueError(
+                    "--run-pangraph requires --pangraph-args. "
+                    "Use placeholders like {input_fasta}, {pangraph_out}, {pangraph_json}."
+                )
+            run_command(
+                [pangraph_bin, "build", "--circular", "--len", "1000", str(input_fa)],
+                stdout_path=pangraph_json,
             )
-        run_command([pangraph_bin] + _render_tokens(list(args.pangraph_args)))
+        else:
+            run_command([pangraph_bin] + _render_tokens(list(args.pangraph_args)))
 
     if args.run_dipper:
         dipper_bin = shutil.which(args.dipper_bin)
         if not dipper_bin:
             raise RuntimeError(f"DIPPER executable not found: {args.dipper_bin}")
         if not args.dipper_args:
-            raise ValueError(
-                "--run-dipper requires --dipper-args. "
-                "Use placeholders like {input_fasta}, {dipper_out}, {dipper_graph}, {aln_fasta}."
-            )
-        run_command([dipper_bin] + _render_tokens(list(args.dipper_args)))
+            if strict_args:
+                raise ValueError(
+                    "--run-dipper requires --dipper-args. "
+                    "Use placeholders like {input_fasta}, {dipper_out}, {dipper_graph}, {aln_fasta}."
+                )
+            # Default assumes DIPPER can output an alignment-like file to {aln_fasta}.
+            run_command([dipper_bin, "-i", "m", "-I", str(input_fa), "-O", str(aln_fa), "-m", "1", "-d", "4"])
+        else:
+            run_command([dipper_bin] + _render_tokens(list(args.dipper_args)))
 
     if args.run_twilight:
         twilight_bin = shutil.which(args.twilight_bin)
         if not twilight_bin:
             raise RuntimeError(f"TWILIGHT executable not found: {args.twilight_bin}")
         if not args.twilight_args:
-            raise ValueError(
-                "--run-twilight requires --twilight-args. "
-                "Use placeholders like {dipper_graph}, {aln_fasta}, {twilight_out}, {guide_tree}."
-            )
-        run_command([twilight_bin] + _render_tokens(list(args.twilight_args)))
+            if strict_args:
+                raise ValueError(
+                    "--run-twilight requires --twilight-args. "
+                    "Use placeholders like {dipper_graph}, {aln_fasta}, {twilight_out}, {guide_tree}."
+                )
+            # Generic default: alignment in, guide tree out.
+            run_command([twilight_bin, "-I", str(aln_fa), "-O", str(guide_tree)])
+        else:
+            run_command([twilight_bin] + _render_tokens(list(args.twilight_args)))
 
     blocks_dir = Path(args.blocks_dir).resolve() if args.blocks_dir else (out_dir / "panman_blocks")
     if args.run_panman:
@@ -1125,13 +1135,50 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         # panman ecosystem commonly exposes `panmanUtils` with its own CLI syntax.
         # We therefore pass through user-provided args directly.
         if not args.panman_args:
-            raise ValueError(
-                "--run-panman requires --panman-args for your panmanUtils workflow. "
-                "Please provide panmanUtils arguments that write block FASTA files into --blocks-dir."
-            )
-        cmd = [panman_bin] + _render_tokens(list(args.panman_args))
+            if strict_args:
+                raise ValueError(
+                    "--run-panman requires --panman-args for your panmanUtils workflow. "
+                    "Please provide panmanUtils arguments that write block FASTA files into --blocks-dir."
+                )
+            cmd = [panman_bin, "-P", str(pangraph_json), "-N", str(guide_tree), "-o", str(panman_file)]
+        else:
+            cmd = [panman_bin] + _render_tokens(list(args.panman_args))
         run_command(cmd)
 
+    return {
+        "pangraph_json": pangraph_json,
+        "aln_fa": aln_fa,
+        "guide_tree": guide_tree,
+        "dipper_graph": dipper_graph,
+        "panman_out": panman_out,
+        "panman_file": panman_file,
+        "blocks_dir": blocks_dir,
+    }
+
+
+def cmd_panman(args: argparse.Namespace) -> int:
+    input_fa = Path(args.input).resolve()
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not input_fa.exists():
+        raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
+    paths = run_panman_pipeline(args, input_fa=input_fa, out_dir=out_dir, strict_args=False)
+    logger.info("PanGraph JSON: %s", paths["pangraph_json"])
+    logger.info("Guide tree: %s", paths["guide_tree"])
+    logger.info("PanMAN output: %s", paths["panman_file"])
+    logger.info("Blocks dir (if generated by panman args): %s", paths["blocks_dir"])
+    return 0
+
+
+def cmd_mt_blocks(args: argparse.Namespace) -> int:
+    input_fa = Path(args.input).resolve()
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not input_fa.exists():
+        raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
+
+    paths = run_panman_pipeline(args, input_fa=input_fa, out_dir=out_dir, strict_args=True)
+    blocks_dir = paths["blocks_dir"]
     if not blocks_dir.exists():
         raise FileNotFoundError(f"blocks-dir not found: {blocks_dir}")
 
@@ -1650,6 +1697,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument("--min-len", type=int, default=1000, help="Minimum aligned length")
     p_sort.add_argument("--gap-n", type=int, default=100, help="Number of Ns inserted between contigs")
     p_sort.set_defaults(func=cmd_sort_organ)
+
+    p_pan = subs.add_parser(
+        "panman",
+        help="Run PanGraph -> DIPPER -> TWILIGHT -> panmanUtils from an assembled multifasta",
+    )
+    p_pan.add_argument("-i", "--input", required=True, help="Input multifasta (e.g. sortOrgan/assembled_samples.fasta)")
+    p_pan.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_pan.add_argument("--run-pangraph", action=argparse.BooleanOptionalAction, default=True, help="Run PanGraph stage")
+    p_pan.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
+    p_pan.add_argument(
+        "--pangraph-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to PanGraph. Supports placeholders: {input_fasta} {pangraph_out} {pangraph_json}",
+    )
+    p_pan.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
+    p_pan.add_argument("--run-dipper", action=argparse.BooleanOptionalAction, default=True, help="Run DIPPER stage")
+    p_pan.add_argument("--dipper-bin", default="dipper", help="DIPPER executable name/path")
+    p_pan.add_argument(
+        "--dipper-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to DIPPER. Supports placeholders: {input_fasta} {dipper_out} {dipper_graph} {aln_fasta}",
+    )
+    p_pan.add_argument("--run-twilight", action=argparse.BooleanOptionalAction, default=True, help="Run TWILIGHT stage")
+    p_pan.add_argument("--twilight-bin", default="twilight", help="TWILIGHT executable name/path")
+    p_pan.add_argument(
+        "--twilight-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to TWILIGHT. Supports placeholders: {dipper_graph} {aln_fasta} {twilight_out} {guide_tree}",
+    )
+    p_pan.add_argument("--run-panman", action=argparse.BooleanOptionalAction, default=True, help="Run panmanUtils stage")
+    p_pan.add_argument("--panman-bin", default="panmanUtils", help="panman executable name/path")
+    p_pan.add_argument(
+        "--panman-args",
+        nargs="*",
+        default=[],
+        help="Arguments passed to panmanUtils. Supports placeholders: {pangraph_json} {guide_tree} {panman_out} {panman_file}",
+    )
+    p_pan.add_argument("--aln-file", help="Alignment path for DIPPER/TWILIGHT handoff (optional)")
+    p_pan.add_argument("--guide-tree", help="Guide tree path for TWILIGHT/PanMAN handoff (optional)")
+    p_pan.add_argument("--dipper-graph", help="DIPPER graph path (optional)")
+    p_pan.add_argument("--blocks-dir", help="Directory intended for block outputs if panman args produce them")
+    p_pan.set_defaults(func=cmd_panman)
 
     p_mt = subs.add_parser(
         "mtBlocks",

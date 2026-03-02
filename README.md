@@ -75,6 +75,18 @@ Outputs:
 - `assembled_samples.fasta` (merged multifasta)
 - per-sample `*.organellar.fasta`
 
+After `sortOrgan`, you can run PanGraph -> DIPPER -> TWILIGHT -> panmanUtils directly:
+
+```bash
+OrganPath panman \
+  -i out_mt/sortOrgan/assembled_samples.fasta \
+  -o out_mt/panman \
+  --run-pangraph \
+  --run-dipper \
+  --run-twilight \
+  --run-panman
+```
+
 Three organelle channels:
 
 ```bash
@@ -187,3 +199,4 @@ Argument placeholders supported in `--pangraph-args/--dipper-args/--twilight-arg
 - `{twilight_out}`: TWILIGHT working directory
 - `{guide_tree}`: guide tree path (default: `twilight/guide_tree.nwk`)
 - `{panman_out}`: panman working directory
+- `{panman_file}`: default panman output path (`panman_run/result.panman`)
