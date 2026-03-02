@@ -658,7 +658,6 @@ def run_getorgan_one_sample(
     extra_args: List[str],
 ) -> Tuple[str, str, str]:
     sample_out = out_dir / sample
-    sample_out.mkdir(parents=True, exist_ok=True)
     cmd = [
         go_bin,
         "-1",
@@ -685,6 +684,16 @@ def run_getorgan_one_sample(
 
     try:
         run_command(cmd)
+        # Validate that GetOrganelle actually produced outputs.
+        if not sample_out.exists():
+            return sample, "FAIL", "no_output_dir_created"
+        expected = (
+            list(sample_out.rglob("*contigs*.fasta"))
+            + list(sample_out.rglob("*.fastg"))
+            + list(sample_out.rglob("*.gfa"))
+        )
+        if not expected:
+            return sample, "FAIL", "no_assembly_outputs_found"
         return sample, "OK", "-"
     except subprocess.CalledProcessError as exc:
         return sample, "FAIL", str(exc.returncode)
