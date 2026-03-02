@@ -994,6 +994,243 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     return 0
 
 
+def list_block_fastas(blocks_dir: Path) -> List[Path]:
+    pats = ["*.fa", "*.fasta", "*.fas", "*.fna"]
+    files: List[Path] = []
+    for p in pats:
+        files.extend(sorted(blocks_dir.glob(p)))
+    return files
+
+
+def align_trim_one_block(block_fa: Path, out_dir: Path, mafft_bin: str, trimal_bin: str) -> Optional[Path]:
+    seqs = read_fasta_sequences(block_fa)
+    if len(seqs) < 2:
+        return None
+    aln = out_dir / f"{block_fa.stem}.aln.fasta"
+    trimmed = out_dir / f"{block_fa.stem}.trim.fasta"
+    run_command([mafft_bin, "--auto", str(block_fa)], stdout_path=aln)
+    run_command([trimal_bin, "-automated1", "-in", str(aln), "-out", str(trimmed)])
+    return trimmed
+
+
+def concatenate_blocks(trimmed_blocks: List[Path], out_fa: Path, out_partitions: Path) -> None:
+    block_data: List[Tuple[str, Dict[str, str], int]] = []
+    all_samples = set()
+    for bf in trimmed_blocks:
+        seqs = read_fasta_sequences(bf)
+        if not seqs:
+            continue
+        lengths = {len(v) for v in seqs.values()}
+        if len(lengths) != 1:
+            raise ValueError(f"Block has inconsistent lengths: {bf}")
+        blen = next(iter(lengths))
+        block_data.append((bf.stem, seqs, blen))
+        all_samples.update(seqs.keys())
+
+    all_samples = sorted(all_samples)
+    if not block_data:
+        raise ValueError("No trimmed blocks available for concatenation.")
+
+    with out_partitions.open("wt") as part:
+        start = 1
+        for bid, _seqs, blen in block_data:
+            end = start + blen - 1
+            part.write(f"DNA,{bid}={start}-{end}\n")
+            start = end + 1
+
+    with out_fa.open("wt") as out:
+        for s in all_samples:
+            concat = []
+            for _bid, seqs, blen in block_data:
+                concat.append(seqs.get(s, "N" * blen))
+            out.write(f">{s}\n{''.join(concat)}\n")
+
+
+def cmd_mt_blocks(args: argparse.Namespace) -> int:
+    input_fa = Path(args.input).resolve()
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not input_fa.exists():
+        raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
+
+    blocks_dir = Path(args.blocks_dir).resolve() if args.blocks_dir else (out_dir / "panman_blocks")
+    if args.run_panman:
+        panman_bin = shutil.which(args.panman_bin)
+        if not panman_bin:
+            raise RuntimeError(f"panman executable not found: {args.panman_bin}")
+        blocks_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [panman_bin, "-i", str(input_fa), "-o", str(blocks_dir)] + list(args.panman_args)
+        run_command(cmd)
+
+    if not blocks_dir.exists():
+        raise FileNotFoundError(f"blocks-dir not found: {blocks_dir}")
+
+    block_fastas = list_block_fastas(blocks_dir)
+    if not block_fastas:
+        raise ValueError(f"No block FASTA files found in {blocks_dir}")
+
+    mafft_bin = ensure_tool(args.mafft_bin)
+    trimal_bin = ensure_tool(args.trimal_bin)
+    aln_dir = out_dir / "blocks_aln"
+    aln_dir.mkdir(parents=True, exist_ok=True)
+
+    trimmed_blocks: List[Path] = []
+    with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
+        sumf.write("block_file\tstatus\ttrimmed_block\n")
+        for bf in block_fastas:
+            try:
+                trimmed = align_trim_one_block(bf, aln_dir, mafft_bin=mafft_bin, trimal_bin=trimal_bin)
+                if trimmed is None:
+                    sumf.write(f"{bf}\tSKIP\t-\n")
+                    continue
+                trimmed_blocks.append(trimmed)
+                sumf.write(f"{bf}\tOK\t{trimmed}\n")
+            except Exception:
+                sumf.write(f"{bf}\tFAIL\t-\n")
+
+    supermatrix = out_dir / "mt_supermatrix.fasta"
+    partitions = out_dir / "mt_partitions.txt"
+    concatenate_blocks(trimmed_blocks, supermatrix, partitions)
+    logger.info("Concatenated supermatrix: %s", supermatrix)
+    logger.info("Partitions file: %s", partitions)
+
+    if args.run_ml:
+        run_phyview(
+            trimmed_fasta=supermatrix,
+            out_dir=out_dir / "ml",
+            ufboot=args.ufboot,
+            threads=args.threads,
+            model=args.model,
+            safe=not args.unsafe,
+        )
+    return 0
+
+
+def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
+    ns = argparse.Namespace(
+        reads_dir=args.reads_dir,
+        outdir=str((Path(args.outdir).resolve() / "getOrgan")),
+        seed=args.seed,
+        r1_suffix=args.r1_suffix,
+        r2_suffix=args.r2_suffix,
+        organelle_type="embplant_pt",
+        jobs=args.jobs,
+        threads=args.threads,
+        rounds=args.rounds,
+        kmer=args.kmer,
+        max_reads=args.max_reads,
+        getorganelle_bin=args.getorganelle_bin,
+        extra_args=args.getorgan_extra_args,
+    )
+    cmd_get_organ(ns)
+
+    ss = argparse.Namespace(
+        input_dir=str((Path(args.outdir).resolve() / "getOrgan")),
+        outdir=str((Path(args.outdir).resolve() / "sortOrgan")),
+        seed=args.seed,
+        aligner=args.aligner,
+        min_identity=args.min_identity,
+        min_len=args.min_len_pt,
+        gap_n=args.gap_n,
+    )
+    return cmd_sort_organ(ss)
+
+
+def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
+    ns = argparse.Namespace(
+        reads_dir=args.reads_dir,
+        outdir=str((Path(args.outdir).resolve() / "getOrgan")),
+        seed=args.seed,
+        r1_suffix=args.r1_suffix,
+        r2_suffix=args.r2_suffix,
+        organelle_type="embplant_mt",
+        jobs=args.jobs,
+        threads=args.threads,
+        rounds=args.rounds,
+        kmer=args.kmer,
+        max_reads=args.max_reads,
+        getorganelle_bin=args.getorganelle_bin,
+        extra_args=args.getorgan_extra_args,
+    )
+    cmd_get_organ(ns)
+
+    ss = argparse.Namespace(
+        input_dir=str((Path(args.outdir).resolve() / "getOrgan")),
+        outdir=str((Path(args.outdir).resolve() / "sortOrgan")),
+        seed=args.seed,
+        aligner=args.aligner,
+        min_identity=args.min_identity,
+        min_len=args.min_len_mt,
+        gap_n=args.gap_n,
+    )
+    cmd_sort_organ(ss)
+
+    ms = argparse.Namespace(
+        input=str((Path(args.outdir).resolve() / "sortOrgan" / "assembled_samples.fasta")),
+        outdir=str((Path(args.outdir).resolve() / "mtBlocks")),
+        blocks_dir=args.blocks_dir,
+        run_panman=args.run_panman,
+        panman_bin=args.panman_bin,
+        panman_args=args.panman_args,
+        mafft_bin=args.mafft_bin,
+        trimal_bin=args.trimal_bin,
+        run_ml=args.run_ml,
+        ufboot=args.ufboot,
+        threads=args.ml_threads,
+        model=args.model,
+        unsafe=args.unsafe,
+    )
+    return cmd_mt_blocks(ms)
+
+
+def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
+    ns = argparse.Namespace(
+        reads_dir=args.reads_dir,
+        outdir=str((Path(args.outdir).resolve() / "getOrgan")),
+        seed=args.seed,
+        r1_suffix=args.r1_suffix,
+        r2_suffix=args.r2_suffix,
+        organelle_type="animal_mt",
+        jobs=args.jobs,
+        threads=args.threads,
+        rounds=args.rounds,
+        kmer=args.kmer,
+        max_reads=args.max_reads,
+        getorganelle_bin=args.getorganelle_bin,
+        extra_args=args.getorgan_extra_args,
+    )
+    cmd_get_organ(ns)
+
+    ss = argparse.Namespace(
+        input_dir=str((Path(args.outdir).resolve() / "getOrgan")),
+        outdir=str((Path(args.outdir).resolve() / "sortOrgan")),
+        seed=args.seed,
+        aligner=args.aligner,
+        min_identity=args.min_identity,
+        min_len=args.min_len_mt,
+        gap_n=args.gap_n,
+    )
+    cmd_sort_organ(ss)
+
+    # Animal mt usually linearize/alignment simpler; build ML directly from multifasta.
+    sort_multi = Path(args.outdir).resolve() / "sortOrgan" / "assembled_samples.fasta"
+    aligned = Path(args.outdir).resolve() / "animal_mt.aligned.fasta"
+    trimmed = Path(args.outdir).resolve() / "animal_mt.trimmed.fasta"
+    mafft_bin = ensure_tool(args.mafft_bin)
+    trimal_bin = ensure_tool(args.trimal_bin)
+    run_alignment_and_trimming(sort_multi, aligned, trimmed, mafft_bin=mafft_bin, trimal_bin=trimal_bin)
+    if args.run_ml:
+        run_phyview(
+            trimmed_fasta=trimmed,
+            out_dir=Path(args.outdir).resolve() / "ml",
+            ufboot=args.ufboot,
+            threads=args.ml_threads,
+            model=args.model,
+            safe=not args.unsafe,
+        )
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.outdir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1330,6 +1567,109 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument("--min-len", type=int, default=1000, help="Minimum aligned length")
     p_sort.add_argument("--gap-n", type=int, default=100, help="Number of Ns inserted between contigs")
     p_sort.set_defaults(func=cmd_sort_organ)
+
+    p_mt = subs.add_parser(
+        "mtBlocks",
+        help="Plant mitochondrial route: panman blocks -> block MAFFT+trimAl -> concatenated supermatrix",
+    )
+    p_mt.add_argument("-i", "--input", required=True, help="Input multifasta (per-sample mt assemblies)")
+    p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_mt.add_argument("--blocks-dir", help="Directory containing block fasta files (if panman already run)")
+    p_mt.add_argument("--run-panman", action="store_true", help="Run panman to generate blocks")
+    p_mt.add_argument("--panman-bin", default="panman", help="panman executable name/path")
+    p_mt.add_argument("--panman-args", nargs="*", default=[], help="Extra args passed to panman")
+    p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
+    p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
+    p_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated supermatrix")
+    p_mt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
+    p_mt.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
+    p_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
+    p_mt.set_defaults(func=cmd_mt_blocks)
+
+    p_ch_pt = subs.add_parser(
+        "plant_pt",
+        help="Channel: plant chloroplast (GetOrganelle + sortOrgan)",
+    )
+    p_ch_pt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
+    p_ch_pt.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_ch_pt.add_argument("-s", "--seed", required=True, help="Seed/reference fasta")
+    p_ch_pt.add_argument("--r1-suffix", default="_1.fastq.gz", help="R1 filename suffix")
+    p_ch_pt.add_argument("--r2-suffix", default="_2.fastq.gz", help="R2 filename suffix")
+    p_ch_pt.add_argument("--jobs", type=int, default=1, help="Parallel sample jobs for GetOrganelle")
+    p_ch_pt.add_argument("--threads", type=int, default=8, help="Threads per GetOrganelle sample")
+    p_ch_pt.add_argument("--rounds", type=int, default=15, help="GetOrganelle rounds")
+    p_ch_pt.add_argument("--kmer", default="", help="GetOrganelle kmer string")
+    p_ch_pt.add_argument("--max-reads", type=int, default=0, help="GetOrganelle -n max reads")
+    p_ch_pt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
+    p_ch_pt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
+    p_ch_pt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
+    p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
+    p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection")
+    p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_pt.set_defaults(func=cmd_channel_plant_pt)
+
+    p_ch_mt = subs.add_parser(
+        "plant_mt",
+        help="Channel: plant mitochondria (GetOrganelle + sortOrgan + mtBlocks)",
+    )
+    p_ch_mt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
+    p_ch_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_ch_mt.add_argument("-s", "--seed", required=True, help="Seed/reference fasta")
+    p_ch_mt.add_argument("--r1-suffix", default="_1.fastq.gz", help="R1 filename suffix")
+    p_ch_mt.add_argument("--r2-suffix", default="_2.fastq.gz", help="R2 filename suffix")
+    p_ch_mt.add_argument("--jobs", type=int, default=1, help="Parallel sample jobs for GetOrganelle")
+    p_ch_mt.add_argument("--threads", type=int, default=8, help="Threads per GetOrganelle sample")
+    p_ch_mt.add_argument("--rounds", type=int, default=15, help="GetOrganelle rounds")
+    p_ch_mt.add_argument("--kmer", default="", help="GetOrganelle kmer string")
+    p_ch_mt.add_argument("--max-reads", type=int, default=0, help="GetOrganelle -n max reads")
+    p_ch_mt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
+    p_ch_mt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
+    p_ch_mt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
+    p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
+    p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
+    p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_mt.add_argument("--run-panman", action="store_true", help="Run panman to derive conserved blocks")
+    p_ch_mt.add_argument("--panman-bin", default="panman", help="panman executable")
+    p_ch_mt.add_argument("--panman-args", nargs="*", default=[], help="Extra args for panman")
+    p_ch_mt.add_argument("--blocks-dir", help="Existing panman blocks dir")
+    p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
+    p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
+    p_ch_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated blocks")
+    p_ch_mt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
+    p_ch_mt.add_argument("--ml-threads", default="AUTO", help="Thread setting passed to iqtree -T")
+    p_ch_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_ch_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
+    p_ch_mt.set_defaults(func=cmd_channel_plant_mt)
+
+    p_ch_amt = subs.add_parser(
+        "animal_mt",
+        help="Channel: animal mitochondria (GetOrganelle + sortOrgan + direct alignment/tree)",
+    )
+    p_ch_amt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
+    p_ch_amt.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_ch_amt.add_argument("-s", "--seed", required=True, help="Seed/reference fasta")
+    p_ch_amt.add_argument("--r1-suffix", default="_1.fastq.gz", help="R1 filename suffix")
+    p_ch_amt.add_argument("--r2-suffix", default="_2.fastq.gz", help="R2 filename suffix")
+    p_ch_amt.add_argument("--jobs", type=int, default=1, help="Parallel sample jobs for GetOrganelle")
+    p_ch_amt.add_argument("--threads", type=int, default=8, help="Threads per GetOrganelle sample")
+    p_ch_amt.add_argument("--rounds", type=int, default=15, help="GetOrganelle rounds")
+    p_ch_amt.add_argument("--kmer", default="", help="GetOrganelle kmer string")
+    p_ch_amt.add_argument("--max-reads", type=int, default=0, help="GetOrganelle -n max reads")
+    p_ch_amt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
+    p_ch_amt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
+    p_ch_amt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
+    p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
+    p_ch_amt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
+    p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_amt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
+    p_ch_amt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
+    p_ch_amt.add_argument("--run-ml", action="store_true", help="Run ML tree after alignment")
+    p_ch_amt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
+    p_ch_amt.add_argument("--ml-threads", default="AUTO", help="Thread setting passed to iqtree -T")
+    p_ch_amt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_ch_amt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
+    p_ch_amt.set_defaults(func=cmd_channel_animal_mt)
 
     p_chk = subs.add_parser("check", help="Check runtime environment and external tools")
     p_chk.set_defaults(func=cmd_check)
