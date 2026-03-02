@@ -789,6 +789,43 @@ def reverse_complement(seq: str) -> str:
     return seq.translate(table)[::-1]
 
 
+def read_primary_fasta_sequence(path: Path) -> str:
+    seqs = read_fasta_sequences(path)
+    if not seqs:
+        raise ValueError(f"No sequences found in fasta: {path}")
+    return next(iter(seqs.values())).upper()
+
+
+def rotate_sequence_to_seed_start(seq: str, seed_seq: str, k: int = 80) -> Tuple[str, str]:
+    if not seq or not seed_seq:
+        return seq, "no-seq"
+    seed_u = seed_seq.upper()
+    s_u = seq.upper()
+    rc_u = reverse_complement(s_u)
+
+    k = max(20, min(k, len(seed_u)))
+    anchor = seed_u[:k]
+    while "N" in anchor and k > 20:
+        k -= 10
+        anchor = seed_u[:k]
+
+    def _find_and_rotate(q: str) -> Optional[str]:
+        idx = q.find(anchor)
+        if idx < 0:
+            return None
+        return q[idx:] + q[:idx]
+
+    fwd = _find_and_rotate(s_u)
+    rev = _find_and_rotate(rc_u)
+    if fwd is not None and rev is not None:
+        return (fwd, "forward") if fwd.count("N") <= rev.count("N") else (rev, "reverse-complement")
+    if fwd is not None:
+        return fwd, "forward"
+    if rev is not None:
+        return rev, "reverse-complement"
+    return s_u, "anchor-not-found"
+
+
 def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
     contig = None
     for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
@@ -866,7 +903,9 @@ def build_sample_assembly_from_contigs(
     min_len: int,
     gap_n: int,
     aligner: str,
-) -> Tuple[str, int, int]:
+    organelle_mode: str = "generic",
+    seed_seq: Optional[str] = None,
+) -> Tuple[str, int, int, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
     if not contigs:
@@ -933,10 +972,14 @@ def build_sample_assembly_from_contigs(
             kept += 1
 
     merged = n_gap.join(seq_parts)
+    note = "-"
+    if organelle_mode in {"plant_pt", "animal_mt"} and seed_seq:
+        merged, orient = rotate_sequence_to_seed_start(merged, seed_seq=seed_seq)
+        note = f"rotated:{orient}"
     out_fa = out_dir / f"{sample_name}.organellar.fasta"
     with out_fa.open("wt") as out:
         out.write(f">{sample_name}\n{merged}\n")
-    return str(out_fa), kept, len(merged)
+    return str(out_fa), kept, len(merged), note
 
 
 def cmd_sort_organ(args: argparse.Namespace) -> int:
@@ -948,6 +991,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     if not seed.exists():
         raise FileNotFoundError(f"seed fasta not found: {seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
+    seed_seq = read_primary_fasta_sequence(seed)
 
     sample_dirs = sorted([p for p in in_dir.iterdir() if p.is_dir()])
     if not sample_dirs:
@@ -957,18 +1001,18 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     all_multi = out_dir / "assembled_samples.fasta"
     with summary.open("wt") as sumf, all_multi.open("wt") as mf:
         sumf.write(
-            "sample\tstatus\tcontigs_fasta\tfastg\tselected_contigs\tassembled_len\tassembled_fasta\tmessage\n"
+            "sample\tstatus\tmode\tcontigs_fasta\tfastg\tselected_contigs\tassembled_len\tassembled_fasta\tmessage\n"
         )
         for sdir in sample_dirs:
             sample = sdir.name
             contig, fastg = pick_sample_contig_and_fastg(sdir)
             if contig is None:
-                sumf.write(f"{sample}\tFAIL\t-\t{fastg or '-'}\t0\t0\t-\tcontigs not found\n")
+                sumf.write(f"{sample}\tFAIL\t{args.organelle_mode}\t-\t{fastg or '-'}\t0\t0\t-\tcontigs not found\n")
                 continue
 
             sample_out = out_dir / sample
             try:
-                out_fa, nsel, alen = build_sample_assembly_from_contigs(
+                out_fa, nsel, alen, note = build_sample_assembly_from_contigs(
                     contig_fa=contig,
                     seed_fa=seed,
                     sample_name=sample,
@@ -977,16 +1021,18 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     min_len=args.min_len,
                     gap_n=args.gap_n,
                     aligner=args.aligner,
+                    organelle_mode=args.organelle_mode,
+                    seed_seq=seed_seq,
                 )
                 seqs = read_fasta_sequences(Path(out_fa))
                 for sid, seq in seqs.items():
                     mf.write(f">{sid}\n{seq}\n")
                 sumf.write(
-                    f"{sample}\tOK\t{contig}\t{fastg or '-'}\t{nsel}\t{alen}\t{out_fa}\t-\n"
+                    f"{sample}\tOK\t{args.organelle_mode}\t{contig}\t{fastg or '-'}\t{nsel}\t{alen}\t{out_fa}\t{note}\n"
                 )
             except Exception as exc:
                 sumf.write(
-                    f"{sample}\tFAIL\t{contig}\t{fastg or '-'}\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
+                    f"{sample}\tFAIL\t{args.organelle_mode}\t{contig}\t{fastg or '-'}\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
                 )
 
     logger.info("sortOrgan completed. Summary: %s", summary)
@@ -1246,6 +1292,7 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         outdir=str((Path(args.outdir).resolve() / "sortOrgan")),
         seed=args.seed,
         aligner=args.aligner,
+        organelle_mode="plant_pt",
         min_identity=args.min_identity,
         min_len=args.min_len_pt,
         gap_n=args.gap_n,
@@ -1276,6 +1323,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         outdir=str((Path(args.outdir).resolve() / "sortOrgan")),
         seed=args.seed,
         aligner=args.aligner,
+        organelle_mode="plant_mt",
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
@@ -1336,6 +1384,7 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         outdir=str((Path(args.outdir).resolve() / "sortOrgan")),
         seed=args.seed,
         aligner=args.aligner,
+        organelle_mode="animal_mt",
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
@@ -1692,6 +1741,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         choices=["auto", "minimap2", "blastn"],
         help="Aligner for contig-to-seed mapping",
+    )
+    p_sort.add_argument(
+        "--organelle-mode",
+        default="generic",
+        choices=["generic", "plant_pt", "plant_mt", "animal_mt"],
+        help="Sorting strategy by organelle type",
     )
     p_sort.add_argument("--min-identity", type=float, default=0.95, help="Minimum alignment identity")
     p_sort.add_argument("--min-len", type=int, default=1000, help="Minimum aligned length")

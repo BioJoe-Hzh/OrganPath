@@ -66,9 +66,16 @@ OrganPath sortOrgan \
   -i getorgan_out \
   -o sortorgan_out \
   -s seed.fa \
+  --organelle-mode plant_mt \
   --min-identity 0.95 \
   --min-len 1000
 ```
+
+`--organelle-mode` strategies:
+- `plant_pt`: chloroplast-oriented sorting; output is rotated to seed start/orientation.
+- `plant_mt`: mitochondrial homolog filtering against seed (reduce nuclear contamination).
+- `animal_mt`: mitochondrial sorting with seed-start rotation for consistent coordinates.
+- `generic`: original contig-order behavior.
 
 Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)
