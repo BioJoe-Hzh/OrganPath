@@ -104,6 +104,11 @@ Notes:
   and auto-generates `cp_regions.tsv`.
 - You can skip running `cpstools` inside OrganPath by passing `--cp-regions cp_regions.tsv`.
 - `cp_regions.tsv` must include labels for `LSC`, `SSC`, and one of `IRB/IRA/IR`.
+- In `plant_pt --pt-single-ir`, OrganPath now uses two routes:
+  - complete-like (single long contig): sample-level cpstools IR + single-IR reorder
+  - fragmented: assign contigs to `LSC/IR/SSC`, stitch in order with `N` gaps
+- `sortorgan_summary.tsv` records per-sample type and missing estimate in `message`
+  (`type:complete` or `type:fragmented`, plus `missing_bp` and `expected_len`).
 
 Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)

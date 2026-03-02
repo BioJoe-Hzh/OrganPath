@@ -933,6 +933,47 @@ def reorder_cp_single_ir(seq: str, cp_regions: Dict[str, Tuple[int, int]], keep_
     return lsc + ir + ssc, ir_name
 
 
+def region_len(start: int, end: int, total_len: int) -> int:
+    s = (start - 1) % total_len
+    e = (end - 1) % total_len
+    return (e - s + 1) if s <= e else (total_len - s + e + 1)
+
+
+def point_in_region(pos1: int, start: int, end: int, total_len: int) -> bool:
+    p = (pos1 - 1) % total_len
+    s = (start - 1) % total_len
+    e = (end - 1) % total_len
+    if s <= e:
+        return s <= p <= e
+    return p >= s or p <= e
+
+
+def choose_ir_name(cp_regions: Dict[str, Tuple[int, int]], keep_ir: str) -> str:
+    keep = keep_ir.lower()
+    if keep == "ira" and "IRA" in cp_regions:
+        return "IRA"
+    if keep == "irb" and "IRB" in cp_regions:
+        return "IRB"
+    if "IRB" in cp_regions:
+        return "IRB"
+    if "IRA" in cp_regions:
+        return "IRA"
+    return "IR"
+
+
+def cp_regions_from_sequence_with_cpstools(seq: str, sample_out: Path, sample_name: str, cpstools_bin: str) -> Dict[str, Tuple[int, int]]:
+    cpstools = shutil.which(cpstools_bin)
+    if not cpstools:
+        raise RuntimeError(f"cpstools executable not found: {cpstools_bin}")
+    tmp_fa = sample_out / f"{sample_name}.cpstools_input.fa"
+    with tmp_fa.open("wt") as out:
+        out.write(f">{sample_name}\n{seq}\n")
+    four_sec = sample_out / f"{sample_name}.cpstools_four_sec.txt"
+    with four_sec.open("wt") as out:
+        subprocess.run([cpstools, "IR", "-i", str(tmp_fa)], stdout=out, check=True)
+    return parse_cpstools_four_sec(four_sec)
+
+
 def resolve_cp_regions(
     seed_fa: Path,
     out_dir: Path,
@@ -1088,6 +1129,10 @@ def build_sample_assembly_from_contigs(
     pt_single_ir: bool = False,
     cp_regions: Optional[Dict[str, Tuple[int, int]]] = None,
     pt_keep_ir: str = "auto",
+    cpstools_bin: str = "cpstools",
+    pt_fragment_min_len: int = 1000,
+    pt_complete_min_frac: float = 0.85,
+    seed_len: int = 0,
 ) -> Tuple[str, int, int, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
@@ -1138,6 +1183,97 @@ def build_sample_assembly_from_contigs(
     chosen = choose_best_hits(hits)
     if not chosen:
         raise ValueError("No contigs passed identity/length filter against seed.")
+
+    # Plant chloroplast specialized flow:
+    # 1) complete-like: single long contig, use cpstools on sample itself for LSC/IR/SSC;
+    # 2) fragmented: partition contigs by reference regions and stitch with N gaps.
+    if organelle_mode == "plant_pt" and pt_single_ir and cp_regions:
+        ir_name = choose_ir_name(cp_regions, pt_keep_ir)
+        ref_total = max(seed_len, len(seed_seq) if seed_seq else 1)
+        expected_lsc = region_len(*cp_regions["LSC"], total_len=ref_total)
+        expected_ssc = region_len(*cp_regions["SSC"], total_len=ref_total)
+        expected_ir = region_len(*cp_regions[ir_name], total_len=ref_total)
+        expected_one_ir = expected_lsc + expected_ir + expected_ssc
+
+        complete_seq: Optional[str] = None
+        complete_note = ""
+        if len(chosen) == 1:
+            cid, _sstart, _send, strand, _ident, _alen = chosen[0]
+            cseq = contigs.get(cid, "")
+            if strand == "-":
+                cseq = reverse_complement(cseq)
+            if len(cseq) >= int(expected_one_ir * pt_complete_min_frac):
+                try:
+                    samp_regions = cp_regions_from_sequence_with_cpstools(
+                        cseq, sample_out=out_dir, sample_name=sample_name, cpstools_bin=cpstools_bin
+                    )
+                    complete_seq, kept_ir = reorder_cp_single_ir(cseq, cp_regions=samp_regions, keep_ir=pt_keep_ir)
+                    complete_note = f"type:complete;single_ir:{kept_ir}"
+                except Exception as exc:
+                    complete_note = f"type:fragmented_fallback;cpstools_sample_fail:{str(exc).replace(chr(9), ' ')}"
+
+        if complete_seq is not None:
+            miss_bp = max(expected_one_ir - len(complete_seq), 0)
+            note = f"{complete_note};missing_bp:{miss_bp};expected_len:{expected_one_ir}"
+            out_fa = out_dir / f"{sample_name}.organellar.fasta"
+            with out_fa.open("wt") as out:
+                out.write(f">{sample_name}\n{complete_seq}\n")
+            with (out_dir / f"{sample_name}.selected_contigs.tsv").open("wt") as tab:
+                tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\tregion\n")
+                h = chosen[0]
+                tab.write(f"{h[0]}\t{h[1]}\t{h[2]}\t{h[3]}\t{h[4]:.4f}\t{h[5]}\tcomplete\n")
+            return str(out_fa), 1, len(complete_seq), note
+
+        # Fragmented route
+        region_order = ["LSC", ir_name, "SSC"]
+        region_hits: Dict[str, List[Tuple[str, int, int, str, float, int]]] = {r: [] for r in region_order}
+        for h in chosen:
+            cid, sstart, send, strand, ident, alen = h
+            if alen < pt_fragment_min_len:
+                continue
+            mid = (sstart + send) // 2
+            assigned = None
+            for r in region_order:
+                rs, re = cp_regions[r]
+                if point_in_region(mid, rs, re, total_len=ref_total):
+                    assigned = r
+                    break
+            if assigned:
+                region_hits[assigned].append(h)
+
+        n_gap = "N" * gap_n
+        final_parts: List[str] = []
+        missing_bp = 0
+        kept = 0
+        with (out_dir / f"{sample_name}.selected_contigs.tsv").open("wt") as tab:
+            tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\tregion\n")
+            for r in region_order:
+                rhs = sorted(region_hits[r], key=lambda x: (x[1], x[2]))
+                region_seq_parts: List[str] = []
+                covered = 0
+                for cid, sstart, send, strand, ident, alen in rhs:
+                    cseq = contigs.get(cid, "")
+                    if not cseq:
+                        continue
+                    if strand == "-":
+                        cseq = reverse_complement(cseq)
+                    region_seq_parts.append(cseq)
+                    covered += max(send - sstart + 1, 0)
+                    kept += 1
+                    tab.write(f"{cid}\t{sstart}\t{send}\t{strand}\t{ident:.4f}\t{alen}\t{r}\n")
+                exp = region_len(*cp_regions[r], total_len=ref_total)
+                if region_seq_parts:
+                    final_parts.append(n_gap.join(region_seq_parts))
+                    missing_bp += max(exp - covered, 0)
+                else:
+                    final_parts.append("N" * exp)
+                    missing_bp += exp
+        merged = "".join(final_parts)
+        note = f"type:fragmented;single_ir:{ir_name};missing_bp:{missing_bp};expected_len:{expected_one_ir}"
+        out_fa = out_dir / f"{sample_name}.organellar.fasta"
+        with out_fa.open("wt") as out:
+            out.write(f">{sample_name}\n{merged}\n")
+        return str(out_fa), kept, len(merged), note
 
     n_gap = "N" * gap_n
     seq_parts: List[str] = []
@@ -1232,6 +1368,10 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     pt_single_ir=args.pt_single_ir,
                     cp_regions=cp_regions,
                     pt_keep_ir=args.pt_keep_ir,
+                    cpstools_bin=args.cpstools_bin,
+                    pt_fragment_min_len=args.pt_fragment_min_len,
+                    pt_complete_min_frac=args.pt_complete_min_frac,
+                    seed_len=len(seed_seq),
                 )
                 seqs = read_fasta_sequences(Path(out_fa))
                 for sid, seq in seqs.items():
@@ -1507,6 +1647,8 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         cp_regions=args.cp_regions,
         cpstools_bin=args.cpstools_bin,
         cpstools_args=args.cpstools_args,
+        pt_fragment_min_len=args.pt_fragment_min_len,
+        pt_complete_min_frac=args.pt_complete_min_frac,
         min_identity=args.min_identity,
         min_len=args.min_len_pt,
         gap_n=args.gap_n,
@@ -1543,6 +1685,8 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         cp_regions=None,
         cpstools_bin="cpstools",
         cpstools_args=[],
+        pt_fragment_min_len=1000,
+        pt_complete_min_frac=0.85,
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
@@ -1609,6 +1753,8 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         cp_regions=None,
         cpstools_bin="cpstools",
         cpstools_args=[],
+        pt_fragment_min_len=1000,
+        pt_complete_min_frac=0.85,
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
@@ -1991,6 +2137,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Args passed to cpstools. Placeholders: {seed_fasta} {cpstools_out} {cp_regions_tsv}",
     )
+    p_sort.add_argument("--pt-fragment-min-len", type=int, default=1000, help="plant_pt fragmented mode: minimum contig hit length")
+    p_sort.add_argument("--pt-complete-min-frac", type=float, default=0.85, help="plant_pt complete mode: minimum fraction of expected one-IR length")
     p_sort.add_argument("--min-identity", type=float, default=None, help="Minimum alignment identity (default by --organelle-mode)")
     p_sort.add_argument("--min-len", type=int, default=None, help="Minimum aligned length (default by --organelle-mode)")
     p_sort.add_argument("--gap-n", type=int, default=None, help="Number of Ns between selected contigs (default by --organelle-mode)")
@@ -2118,6 +2266,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--cp-regions", help="Region table from cpstools (LSC/SSC/IR coordinates)")
     p_ch_pt.add_argument("--cpstools-bin", default="cpstools", help="cpstools executable")
     p_ch_pt.add_argument("--cpstools-args", nargs="*", default=[], help="Args passed to cpstools")
+    p_ch_pt.add_argument("--pt-fragment-min-len", type=int, default=1000, help="Fragmented cp mode minimum contig length")
+    p_ch_pt.add_argument("--pt-complete-min-frac", type=float, default=0.85, help="Complete cp mode minimum fraction of expected one-IR length")
     p_ch_pt.set_defaults(func=cmd_channel_plant_pt)
 
     p_ch_mt = subs.add_parser(
