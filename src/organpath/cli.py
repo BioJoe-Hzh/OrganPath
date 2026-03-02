@@ -22,6 +22,12 @@ DEFAULT_MIN_COVERAGE = 0.5
 DEFAULT_MIN_MEAN_DEPTH = 10.0
 DEFAULT_MIN_DP = 8
 DEFAULT_MIN_GQ = 30.0
+ORG_SORT_DEFAULTS = {
+    "generic": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
+    "plant_pt": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
+    "plant_mt": {"min_identity": 0.95, "min_len": 3000, "gap_n": 100},
+    "animal_mt": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
+}
 
 
 @dataclass
@@ -1172,6 +1178,17 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"seed fasta not found: {seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
     seed_seq = read_primary_fasta_sequence(seed)
+    prof = ORG_SORT_DEFAULTS.get(args.organelle_mode, ORG_SORT_DEFAULTS["generic"])
+    min_identity = args.min_identity if args.min_identity is not None else prof["min_identity"]
+    min_len = args.min_len if args.min_len is not None else prof["min_len"]
+    gap_n = args.gap_n if args.gap_n is not None else prof["gap_n"]
+    logger.info(
+        "sortOrgan defaults for mode=%s: min_identity=%.3f min_len=%d gap_n=%d",
+        args.organelle_mode,
+        min_identity,
+        min_len,
+        gap_n,
+    )
     cp_regions: Optional[Dict[str, Tuple[int, int]]] = None
     if args.organelle_mode == "plant_pt" and args.pt_single_ir:
         cp_regions = resolve_cp_regions(
@@ -1206,9 +1223,9 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     seed_fa=seed,
                     sample_name=sample,
                     out_dir=sample_out,
-                    min_identity=args.min_identity,
-                    min_len=args.min_len,
-                    gap_n=args.gap_n,
+                    min_identity=min_identity,
+                    min_len=min_len,
+                    gap_n=gap_n,
                     aligner=args.aligner,
                     organelle_mode=args.organelle_mode,
                     seed_seq=seed_seq,
@@ -1938,7 +1955,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sort = subs.add_parser(
         "sortOrgan",
-        help="Sort and orient assembled organellar contigs by seed; output per-sample fasta",
+        help="Sort and orient assembled organellar contigs by seed; output per-sample fasta (mode defaults built-in)",
     )
     p_sort.add_argument("-i", "--input-dir", required=True, help="Input folder from OrganPath getOrgan outputs")
     p_sort.add_argument("-o", "--outdir", required=True, help="Output folder for sorted assemblies")
@@ -1953,7 +1970,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--organelle-mode",
         default="generic",
         choices=["generic", "plant_pt", "plant_mt", "animal_mt"],
-        help="Sorting strategy by organelle type",
+        help=(
+            "Sorting strategy by organelle type. "
+            "Defaults: plant_pt(0.95,1000,100), plant_mt(0.95,3000,100), "
+            "animal_mt(0.95,1000,100), generic(0.95,1000,100) for (identity,min_len,gap_n)"
+        ),
     )
     p_sort.add_argument("--pt-single-ir", action="store_true", help="Plant chloroplast mode: reorder as LSC+singleIR+SSC")
     p_sort.add_argument(
@@ -1970,9 +1991,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Args passed to cpstools. Placeholders: {seed_fasta} {cpstools_out} {cp_regions_tsv}",
     )
-    p_sort.add_argument("--min-identity", type=float, default=0.95, help="Minimum alignment identity")
-    p_sort.add_argument("--min-len", type=int, default=1000, help="Minimum aligned length")
-    p_sort.add_argument("--gap-n", type=int, default=100, help="Number of Ns inserted between contigs")
+    p_sort.add_argument("--min-identity", type=float, default=None, help="Minimum alignment identity (default by --organelle-mode)")
+    p_sort.add_argument("--min-len", type=int, default=None, help="Minimum aligned length (default by --organelle-mode)")
+    p_sort.add_argument("--gap-n", type=int, default=None, help="Number of Ns between selected contigs (default by --organelle-mode)")
     p_sort.set_defaults(func=cmd_sort_organ)
 
     p_pan = subs.add_parser(
@@ -2074,7 +2095,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ch_pt = subs.add_parser(
         "plant_pt",
-        help="Channel: plant chloroplast (GetOrganelle + sortOrgan)",
+        help="Channel: plant chloroplast (default profile: identity=0.95, min_len=1000, gap_n=100)",
     )
     p_ch_pt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
     p_ch_pt.add_argument("-o", "--outdir", required=True, help="Output directory")
@@ -2089,9 +2110,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_pt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
     p_ch_pt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
-    p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
-    p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection")
-    p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
+    p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection (default: 1000)")
+    p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
     p_ch_pt.add_argument("--pt-single-ir", action="store_true", help="Reorder chloroplast output to LSC+singleIR+SSC")
     p_ch_pt.add_argument("--pt-keep-ir", default="auto", choices=["auto", "ira", "irb"], help="IR copy kept in single-IR mode")
     p_ch_pt.add_argument("--cp-regions", help="Region table from cpstools (LSC/SSC/IR coordinates)")
@@ -2101,7 +2122,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ch_mt = subs.add_parser(
         "plant_mt",
-        help="Channel: plant mitochondria (GetOrganelle + sortOrgan + mtBlocks)",
+        help="Channel: plant mitochondria (default profile: identity=0.95, min_len=3000, gap_n=100)",
     )
     p_ch_mt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
     p_ch_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
@@ -2116,9 +2137,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_mt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
     p_ch_mt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
-    p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
-    p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
-    p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
+    p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection (default: 3000)")
+    p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
     p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
     p_ch_mt.add_argument("--pangraph-args", nargs="*", default=[], help="Arguments passed to PanGraph")
@@ -2152,7 +2173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ch_amt = subs.add_parser(
         "animal_mt",
-        help="Channel: animal mitochondria (GetOrganelle + sortOrgan + direct alignment/tree)",
+        help="Channel: animal mitochondria (default profile: identity=0.95, min_len=1000, gap_n=100)",
     )
     p_ch_amt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
     p_ch_amt.add_argument("-o", "--outdir", required=True, help="Output directory")
@@ -2167,9 +2188,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_amt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_amt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
     p_ch_amt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
-    p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection")
-    p_ch_amt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection")
-    p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs")
+    p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
+    p_ch_amt.add_argument("--min-len-mt", type=int, default=1000, help="Minimum length for mt contig selection (default: 1000)")
+    p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
     p_ch_amt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_amt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_ch_amt.add_argument("--run-ml", action="store_true", help="Run ML tree after alignment")

@@ -77,6 +77,12 @@ OrganPath sortOrgan \
 - `animal_mt`: mitochondrial sorting with seed-start rotation for consistent coordinates.
 - `generic`: original contig-order behavior.
 
+Built-in default profile by type (`min_identity / min_len / gap_n`):
+- `plant_pt`: `0.95 / 1000 / 100`
+- `plant_mt`: `0.95 / 3000 / 100`
+- `animal_mt`: `0.95 / 1000 / 100`
+- `generic`: `0.95 / 1000 / 100`
+
 Plant chloroplast single-IR mode (LSC + IR + SSC) with `cpstools`:
 
 ```bash
