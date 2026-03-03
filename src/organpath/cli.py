@@ -2941,7 +2941,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments passed to PanGraph. Supports placeholders: {input_fasta} {pangraph_out} {pangraph_json}",
     )
     p_pan.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
-    p_pan.add_argument("--run-dipper", action=argparse.BooleanOptionalAction, default=True, help="Run DIPPER stage")
+    p_pan.add_argument(
+        "--run-dipper",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run DIPPER stage (default: off; provide --guide-tree if skipping TWILIGHT)",
+    )
     p_pan.add_argument("--dipper-bin", default="dipper", help="DIPPER executable name/path")
     p_pan.add_argument(
         "--dipper-args",
@@ -2949,7 +2954,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Arguments passed to DIPPER. Supports placeholders: {input_fasta} {dipper_out} {dipper_graph} {aln_fasta}",
     )
-    p_pan.add_argument("--run-twilight", action=argparse.BooleanOptionalAction, default=True, help="Run TWILIGHT stage")
+    p_pan.add_argument(
+        "--run-twilight",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run TWILIGHT stage (default: off; provide --guide-tree)",
+    )
     p_pan.add_argument("--twilight-bin", default="twilight", help="TWILIGHT executable name/path")
     p_pan.add_argument(
         "--twilight-args",

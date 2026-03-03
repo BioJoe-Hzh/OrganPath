@@ -147,21 +147,20 @@ OrganPath PhyView \
 For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
 When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.
 
-After `sortOrgan`, you can run PanGraph -> DIPPER -> TWILIGHT -> panmanUtils directly:
+After `sortOrgan`, recommended default is PanGraph + user-provided guide tree + panmanUtils (no DIPPER/TWILIGHT):
 
 ```bash
 OrganPath panman \
   -i out_mt/sortOrgan/assembled_samples.fasta \
   -o out_mt/panman \
   --run-pangraph \
-  --run-dipper \
-  --run-twilight \
+  --guide-tree your_tree.nwk \
   --run-panman
 ```
 
 `OrganPath panman` supports two routes:
-- Full route: `pangraph -> dipper -> twilight -> panmanUtils`
-- User-tree route: provide `--guide-tree your_tree.nwk` and skip TWILIGHT (`--no-run-twilight`)
+- Default route: `pangraph -> panmanUtils` (with `--guide-tree`)
+- Optional full route: `pangraph -> dipper -> twilight -> panmanUtils` (enable with `--run-dipper --run-twilight`)
 
 Three organelle channels:
 
@@ -169,7 +168,7 @@ Three organelle channels:
 # Plant chloroplast channel
 OrganPath plant_pt -i reads_dir -o out_pt -s seed_pt.fa --jobs 5 --threads 16
 
-# Plant mitochondrial channel (PanGraph -> DIPPER/TWILIGHT -> panmanUtils -> blocks)
+# Plant mitochondrial channel (PanGraph -> panmanUtils with your guide tree)
 OrganPath plant_mt \
   -i reads_dir \
   -o out_mt \
@@ -178,10 +177,7 @@ OrganPath plant_mt \
   --threads 16 \
   --run-pangraph \
   --pangraph-args <PANGRAPH_ARGS...> \
-  --run-dipper \
-  --dipper-args <DIPPER_ARGS...> \
-  --run-twilight \
-  --twilight-args <TWILIGHT_ARGS...> \
+  --guide-tree your_tree.nwk \
   --run-panman \
   --panman-args <PANMAN_ARGS...>
 
