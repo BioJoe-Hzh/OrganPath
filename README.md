@@ -122,6 +122,28 @@ Outputs:
 `--min-non-n-len` only controls whether a sample is included in `assembled_samples.fasta`.
 Per-sample fasta is still written, and summary marks filtered rows as `FILTERED` with `non_n_len`.
 
+Step 3 (Panel): Align and trim multifasta:
+
+```bash
+OrganPath align \
+  -i sortorgan_out/assembled_samples.fasta \
+  -o align_out \
+  --auto-reverse \
+  --trim
+```
+
+Step 4 (Panel): ML tree from trimmed alignment:
+
+```bash
+OrganPath PhyView \
+  -i align_out/trimmed.fasta \
+  -o phyview_ml \
+  --run_ml \
+  --threads AUTO \
+  --ufboot 1000 \
+  --model MFP
+```
+
 For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
 When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.
 
@@ -175,6 +197,14 @@ OrganPath run \
 OrganPath run \
   -i out_pt/sortOrgan/assembled_samples.fasta \
   -o Pt_ml_tree
+
+# More robust for highly divergent genomes (extra strict post-trim filtering):
+OrganPath run \
+  -i out_pt/sortOrgan/assembled_samples.fasta \
+  -o Pt_ml_tree_strict \
+  --auto-reverse \
+  --max-missing-frac 0.2 \
+  --snp-only
 ```
 
 Default filtering thresholds:

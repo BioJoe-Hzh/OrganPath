@@ -698,6 +698,47 @@ def read_fasta_sequences(path: Path) -> Dict[str, str]:
     return seqs
 
 
+def write_fasta_sequences(path: Path, seqs: Dict[str, str]) -> None:
+    with path.open("wt") as out:
+        for sid, seq in seqs.items():
+            out.write(f">{sid}\n{seq}\n")
+
+
+def filter_alignment_sites(
+    in_fa: Path,
+    out_fa: Path,
+    max_missing_frac: float = 1.0,
+    snp_only: bool = False,
+) -> Tuple[int, int]:
+    seqs = read_fasta_sequences(in_fa)
+    names = list(seqs.keys())
+    lens = {len(v) for v in seqs.values()}
+    if len(lens) != 1:
+        raise ValueError(f"Alignment has inconsistent sequence lengths: {in_fa}")
+    n = len(names)
+    L = next(iter(lens))
+    keep_cols: List[int] = []
+
+    for i in range(L):
+        col = [seqs[s][i].upper() for s in names]
+        called = [b for b in col if b in {"A", "C", "G", "T"}]
+        missing_frac = 1.0 - (len(called) / n)
+        if missing_frac > max_missing_frac:
+            continue
+        if snp_only and len(set(called)) < 2:
+            continue
+        keep_cols.append(i)
+
+    if not keep_cols:
+        raise ValueError(
+            f"No alignment columns left after filtering (max_missing_frac={max_missing_frac}, snp_only={snp_only})"
+        )
+
+    filtered = {s: "".join(seqs[s][i] for i in keep_cols) for s in names}
+    write_fasta_sequences(out_fa, filtered)
+    return len(keep_cols), L
+
+
 def pairwise_distance(seq1: str, seq2: str) -> float:
     valid = 0
     diff = 0
@@ -2194,7 +2235,24 @@ def cmd_run(args: argparse.Namespace) -> int:
             raise FileNotFoundError(f"multifasta not found: {multifasta_in}")
         multifasta = out_dir / "all_samples.fasta"
         shutil.copy2(multifasta_in, multifasta)
-        run_alignment_and_trimming(multifasta, aligned, trimmed, mafft_bin, trimal_bin)
+        run_alignment_with_direction(
+            multifasta=multifasta,
+            aligned=aligned,
+            mafft_bin=mafft_bin,
+            adjust_direction=args.auto_reverse,
+        )
+        pre_trim = out_dir / "trimmed.pre.fasta"
+        run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
+        if args.max_missing_frac < 1.0 or args.snp_only:
+            kept, total = filter_alignment_sites(
+                in_fa=pre_trim,
+                out_fa=trimmed,
+                max_missing_frac=args.max_missing_frac,
+                snp_only=args.snp_only,
+            )
+            logger.info("Post-trim site filter kept %d/%d columns (missing<=%.3f, snp_only=%s).", kept, total, args.max_missing_frac, args.snp_only)
+        else:
+            shutil.move(str(pre_trim), str(trimmed))
         logger.info("Alignment and trimming completed from multifasta input.")
         if args.run_phyview:
             run_phyview(
@@ -2260,7 +2318,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     logger.info("Generated filtered VCF and consensus FASTA files.")
 
-    run_alignment_and_trimming(multifasta, aligned, trimmed, mafft_bin, trimal_bin)
+    run_alignment_with_direction(
+        multifasta=multifasta,
+        aligned=aligned,
+        mafft_bin=mafft_bin,
+        adjust_direction=args.auto_reverse,
+    )
+    pre_trim = out_dir / "trimmed.pre.fasta"
+    run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
+    if args.max_missing_frac < 1.0 or args.snp_only:
+        kept, total = filter_alignment_sites(
+            in_fa=pre_trim,
+            out_fa=trimmed,
+            max_missing_frac=args.max_missing_frac,
+            snp_only=args.snp_only,
+        )
+        logger.info("Post-trim site filter kept %d/%d columns (missing<=%.3f, snp_only=%s).", kept, total, args.max_missing_frac, args.snp_only)
+    else:
+        shutil.move(str(pre_trim), str(trimmed))
     logger.info("Alignment and trimming completed.")
 
     if args.run_phyview:
@@ -2368,6 +2443,42 @@ def cmd_msa2vcf(args: argparse.Namespace) -> int:
     run_command([bcftools, "index", "-t", str(biallelic)])
 
     logger.info("MSA2VCF completed. Outputs: %s", out_dir)
+    return 0
+
+
+def cmd_align(args: argparse.Namespace) -> int:
+    in_fa = Path(args.input).resolve()
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not in_fa.exists():
+        raise FileNotFoundError(f"input fasta not found: {in_fa}")
+
+    mafft_bin = ensure_tool(args.mafft_bin)
+    aligned = out_dir / "aligned.fasta"
+    run_alignment_with_direction(
+        multifasta=in_fa,
+        aligned=aligned,
+        mafft_bin=mafft_bin,
+        adjust_direction=args.auto_reverse,
+    )
+    if args.trim:
+        trimal_bin = ensure_tool(args.trimal_bin)
+        pre_trim = out_dir / "trimmed.pre.fasta"
+        trimmed = out_dir / "trimmed.fasta"
+        run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
+        if args.max_missing_frac < 1.0 or args.snp_only:
+            kept, total = filter_alignment_sites(
+                in_fa=pre_trim,
+                out_fa=trimmed,
+                max_missing_frac=args.max_missing_frac,
+                snp_only=args.snp_only,
+            )
+            logger.info("Align post-trim filter kept %d/%d columns (missing<=%.3f, snp_only=%s).", kept, total, args.max_missing_frac, args.snp_only)
+        else:
+            shutil.move(str(pre_trim), str(trimmed))
+        logger.info("Align completed: %s, %s", aligned, trimmed)
+    else:
+        logger.info("Align completed: %s", aligned)
     return 0
 
 
@@ -2562,6 +2673,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_run.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
+    p_run.add_argument(
+        "--auto-reverse",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use MAFFT --adjustdirectionaccurately during alignment",
+    )
+    p_run.add_argument(
+        "--max-missing-frac",
+        type=float,
+        default=1.0,
+        help="Post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
+    )
+    p_run.add_argument(
+        "--snp-only",
+        action="store_true",
+        help="Post-trim site filter: keep SNP columns only (useful for highly divergent genomes)",
+    )
     p_run.add_argument("--run-phyview", action="store_true", help="Also run OrganPath PhyView after trimming")
     p_run.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number for iqtree")
     p_run.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
@@ -2631,6 +2759,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_m2v.add_argument("--norm-ref", help="Reference fasta for bcftools norm -f (default: first MSA sequence)")
     p_m2v.add_argument("--ref-id", help="Reference sequence ID from MSA when --norm-ref is not provided")
     p_m2v.set_defaults(func=cmd_msa2vcf)
+
+    p_align = subs.add_parser(
+        "align",
+        help="Panel: align multifasta with MAFFT and optional trimAl trimming",
+    )
+    p_align.add_argument("-i", "--input", required=True, help="Input multifasta")
+    p_align.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_align.add_argument("--mafft-bin", default="mafft", help="MAFFT executable name/path")
+    p_align.add_argument(
+        "--auto-reverse",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use MAFFT --adjustdirectionaccurately to auto-handle reverse-complement sequences",
+    )
+    p_align.add_argument(
+        "--trim",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run trimAl after MAFFT",
+    )
+    p_align.add_argument("--trimal-bin", default="trimal", help="trimAl executable name/path")
+    p_align.add_argument(
+        "--max-missing-frac",
+        type=float,
+        default=1.0,
+        help="Post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
+    )
+    p_align.add_argument(
+        "--snp-only",
+        action="store_true",
+        help="Post-trim site filter: keep SNP columns only",
+    )
+    p_align.set_defaults(func=cmd_align)
 
     p_rename = subs.add_parser(
         "RenameTree",
