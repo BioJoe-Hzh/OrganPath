@@ -170,6 +170,11 @@ OrganPath run \
   -o organpath_out \
   --sample-threads 8 \
   --run-phyview
+
+# Or directly from multifasta (e.g. sortOrgan output):
+OrganPath run \
+  -i out_pt/sortOrgan/assembled_samples.fasta \
+  -o Pt_ml_tree
 ```
 
 Default filtering thresholds:

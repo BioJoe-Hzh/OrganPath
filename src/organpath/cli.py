@@ -2177,6 +2177,41 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.outdir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    aligned = out_dir / "aligned.fasta"
+    trimmed = out_dir / "trimmed.fasta"
+    mafft_bin = ensure_tool(args.mafft_bin)
+    trimal_bin = ensure_tool(args.trimal_bin)
+
+    has_msa = bool(args.multifasta)
+    has_vcf = bool(args.vcf)
+    has_ref = bool(args.ref)
+
+    if has_msa and (has_vcf or has_ref):
+        raise ValueError("Use either --multifasta OR (--vcf and --ref), not both.")
+    if has_msa:
+        multifasta_in = Path(args.multifasta).resolve()
+        if not multifasta_in.exists():
+            raise FileNotFoundError(f"multifasta not found: {multifasta_in}")
+        multifasta = out_dir / "all_samples.fasta"
+        shutil.copy2(multifasta_in, multifasta)
+        run_alignment_and_trimming(multifasta, aligned, trimmed, mafft_bin, trimal_bin)
+        logger.info("Alignment and trimming completed from multifasta input.")
+        if args.run_phyview:
+            run_phyview(
+                trimmed_fasta=trimmed,
+                out_dir=out_dir / "phyview",
+                ufboot=args.ufboot,
+                threads=args.threads,
+                model=args.model,
+                safe=not args.unsafe,
+            )
+            logger.info("PhyView ML tree inference completed.")
+        logger.info("All outputs are in: %s", out_dir)
+        return 0
+
+    if not (has_vcf and has_ref):
+        raise ValueError("For VCF mode, both --vcf and --ref are required.")
+
     vcf_path = Path(args.vcf).resolve()
     ref_fasta = Path(args.ref).resolve()
 
@@ -2210,9 +2245,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     filtered_vcf = out_dir / "filtered.kept.masked.vcf"
     sample_fastas = out_dir / "sample_fastas"
     multifasta = out_dir / "all_samples.fasta"
-    aligned = out_dir / "aligned.fasta"
-    trimmed = out_dir / "trimmed.fasta"
-
     filter_vcf_and_build_consensus(
         vcf_path=vcf_path,
         ref_fasta=ref_fasta,
@@ -2228,8 +2260,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     logger.info("Generated filtered VCF and consensus FASTA files.")
 
-    mafft_bin = ensure_tool(args.mafft_bin)
-    trimal_bin = ensure_tool(args.trimal_bin)
     run_alignment_and_trimming(multifasta, aligned, trimmed, mafft_bin, trimal_bin)
     logger.info("Alignment and trimming completed.")
 
@@ -2488,11 +2518,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = subs.add_parser(
         "run",
-        help="Run full workflow from VCF to trimmed alignment",
+        help="Run full workflow from VCF+REF or from multifasta to trimmed alignment",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p_run.add_argument("-v", "--vcf", required=True, help="Input VCF or VCF.GZ")
-    p_run.add_argument("-r", "--ref", required=True, help="Reference fasta")
+    p_run.add_argument("-v", "--vcf", help="Input VCF or VCF.GZ (VCF mode)")
+    p_run.add_argument("-r", "--ref", help="Reference fasta (VCF mode)")
+    p_run.add_argument("-i", "--multifasta", help="Input multifasta (MSA mode: align+trim only)")
     p_run.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_run.add_argument(
         "--id-map",
