@@ -887,7 +887,8 @@ def parse_cp_regions_file(path: Path) -> Dict[str, Tuple[int, int]]:
 def parse_cpstools_four_sec(path: Path) -> Dict[str, Tuple[int, int]]:
     txt = path.read_text()
     regions: Dict[str, Tuple[int, int]] = {}
-    for m in re.finditer(r"(?i)\b(LSC|SSC|IRA|IRB|IR1|IR2|IR)\s*:\s*(\d+)\s*-\s*(\d+)", txt):
+    # Primary parser: tolerate different separators/spaces in cpstools IR outputs.
+    for m in re.finditer(r"(?i)\b(LSC|SSC|IRA|IRB|IR1|IR2|IR)\b[^0-9]{0,20}(\d+)[^0-9]+(\d+)", txt):
         raw_name = m.group(1)
         nm = _normalize_region_name(raw_name)
         if nm is None:
@@ -895,6 +896,19 @@ def parse_cpstools_four_sec(path: Path) -> Dict[str, Tuple[int, int]]:
         s = int(m.group(2))
         e = int(m.group(3))
         regions[nm] = (s, e)
+    # Fallback token parser for unusual output layouts.
+    if "LSC" not in regions or "SSC" not in regions:
+        toks = re.split(r"[\s,;]+", txt)
+        for t in toks:
+            m = re.search(r"(?i)(LSC|SSC|IRA|IRB|IR1|IR2|IR)", t)
+            if not m:
+                continue
+            nm = _normalize_region_name(m.group(1))
+            if nm is None:
+                continue
+            nums = re.findall(r"\d+", t)
+            if len(nums) >= 2:
+                regions[nm] = (int(nums[0]), int(nums[1]))
     if "IR" in regions:
         regions.setdefault("IRB", regions["IR"])
     if "IR1" in regions:
@@ -1027,6 +1041,11 @@ def resolve_cp_regions(
     except Exception:
         shutil.copy2(seed_fa, link_path)
 
+    # cpstools Seq fails if the target output folder already exists.
+    lsc_adj_dir = cp_out / "LSC_adj"
+    if lsc_adj_dir.exists():
+        shutil.rmtree(lsc_adj_dir, ignore_errors=True)
+
     regions: Optional[Dict[str, Tuple[int, int]]] = None
     try:
         subprocess.run(
@@ -1034,7 +1053,6 @@ def resolve_cp_regions(
             check=True,
             cwd=str(cp_out),
         )
-        lsc_adj_dir = cp_out / "LSC_adj"
         lsc_candidates = sorted(lsc_adj_dir.glob("*.fa")) + sorted(lsc_adj_dir.glob("*.fasta"))
         if not lsc_candidates:
             raise FileNotFoundError(f"cpstools Seq did not produce LSC-adjusted fasta in: {lsc_adj_dir}")
