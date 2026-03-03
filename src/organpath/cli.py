@@ -1086,6 +1086,23 @@ def resolve_cp_regions(
 
 def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
     contig = None
+    # Prefer GetOrganelle path sequences (usually best resolved circular path candidates).
+    for pat in (
+        "*path_sequence*.fasta",
+        "*path_sequence*.fa",
+        "*scaffolds.graph*.fasta",
+        "*scaffolds.graph*.fa",
+    ):
+        cands = sorted(sample_dir.rglob(pat))
+        if cands:
+            contig = cands[0]
+            break
+    if contig is not None:
+        fastg_cands = sorted(sample_dir.rglob("*.fastg"))
+        fastg = fastg_cands[0] if fastg_cands else None
+        return contig, fastg
+
+    # Fallback to SPAdes/GetOrganelle contigs.
     for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
         cands = sorted(sample_dir.rglob(pat))
         if cands:
@@ -1243,6 +1260,10 @@ def build_sample_assembly_from_contigs(
         pass
 
     chosen = choose_best_hits(hits)
+    # path_sequence fasta often contains multiple alternative graph paths.
+    # Keep only the best-scoring path to avoid concatenating alternative assemblies.
+    if "path_sequence" in contig_fa.name.lower() and len(chosen) > 1:
+        chosen = [max(chosen, key=lambda x: (x[5], x[4]))]
     if not chosen:
         raise ValueError("No contigs passed identity/length filter against seed.")
 
