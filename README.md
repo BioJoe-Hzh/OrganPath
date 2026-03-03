@@ -68,7 +68,8 @@ OrganPath sortOrgan \
   -s seed.fa \
   --organelle-mode plant_mt \
   --min-identity 0.95 \
-  --min-len 1000
+  --min-len 1000 \
+  --min-non-n-len 8000
 ```
 
 `--organelle-mode` strategies:
@@ -114,6 +115,9 @@ Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)
 - `assembled_samples.fasta` (merged multifasta)
 - per-sample `*.organellar.fasta`
+
+`--min-non-n-len` only controls whether a sample is included in `assembled_samples.fasta`.
+Per-sample fasta is still written, and summary marks filtered rows as `FILTERED` with `non_n_len`.
 
 For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
 When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.

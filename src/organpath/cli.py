@@ -55,6 +55,10 @@ def open_maybe_gzip(path: Path, mode: str = "rt"):
     return path.open(mode)
 
 
+def non_n_length(seq: str) -> int:
+    return sum(1 for b in seq.upper() if b != "N")
+
+
 def parse_ref_fasta(path: Path) -> Dict[str, List[str]]:
     refs: Dict[str, List[str]] = {}
     curr = None
@@ -1500,11 +1504,12 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     min_len = args.min_len if args.min_len is not None else prof["min_len"]
     gap_n = args.gap_n if args.gap_n is not None else prof["gap_n"]
     logger.info(
-        "sortOrgan defaults for mode=%s: min_identity=%.3f min_len=%d gap_n=%d",
+        "sortOrgan defaults for mode=%s: min_identity=%.3f min_len=%d gap_n=%d min_non_n_len=%d",
         args.organelle_mode,
         min_identity,
         min_len,
         gap_n,
+        args.min_non_n_len,
     )
     cp_regions: Optional[Dict[str, Tuple[int, int]]] = None
     expected_one_ir_len: Optional[int] = None
@@ -1531,14 +1536,14 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     all_multi = out_dir / "assembled_samples.fasta"
     with summary.open("wt") as sumf, all_multi.open("wt") as mf:
         sumf.write(
-            "sample\tstatus\tmode\tsource\tchosen_fasta\tcandidate_count\tfastg\tselected_contigs\tassembled_len\tassembled_fasta\tmessage\n"
+            "sample\tstatus\tmode\tsource\tchosen_fasta\tcandidate_count\tfastg\tselected_contigs\tassembled_len\tnon_n_len\tassembled_fasta\tmessage\n"
         )
         for sdir in sample_dirs:
             sample = sdir.name
             candidates, fastg, source = discover_sample_candidates(sdir)
             if not candidates:
                 sumf.write(
-                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t0\t{fastg or '-'}\t0\t0\t-\tno candidate fasta found\n"
+                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t0\t{fastg or '-'}\t0\t0\t0\t-\tno candidate fasta found\n"
                 )
                 continue
 
@@ -1574,14 +1579,25 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     seed_len=len(seed_seq),
                 )
                 seqs = read_fasta_sequences(Path(out_fa))
-                for sid, seq in seqs.items():
-                    mf.write(f">{sid}\n{seq}\n")
+                seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
+                if seq_non_n >= args.min_non_n_len:
+                    for sid, seq in seqs.items():
+                        mf.write(f">{sid}\n{seq}\n")
+                    status = "OK"
+                    note2 = note
+                else:
+                    status = "FILTERED"
+                    note2 = (
+                        f"{note};filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+                        if note != "-"
+                        else f"filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+                    )
                 sumf.write(
-                    f"{sample}\tOK\t{args.organelle_mode}\t{source}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{nsel}\t{alen}\t{out_fa}\t{note}\n"
+                    f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{nsel}\t{alen}\t{seq_non_n}\t{out_fa}\t{note2}\n"
                 )
             except Exception as exc:
                 sumf.write(
-                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t{len(candidates)}\t{fastg or '-'}\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
+                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t{len(candidates)}\t{fastg or '-'}\t0\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
                 )
 
     logger.info("sortOrgan completed. Summary: %s", summary)
@@ -1852,6 +1868,7 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_pt,
         gap_n=args.gap_n,
+        min_non_n_len=args.min_non_n_len,
     )
     return cmd_sort_organ(ss)
 
@@ -1890,6 +1907,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
+        min_non_n_len=args.min_non_n_len,
     )
     cmd_sort_organ(ss)
 
@@ -1958,6 +1976,7 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
+        min_non_n_len=args.min_non_n_len,
     )
     cmd_sort_organ(ss)
 
@@ -2342,6 +2361,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument("--min-identity", type=float, default=None, help="Minimum alignment identity (default by --organelle-mode)")
     p_sort.add_argument("--min-len", type=int, default=None, help="Minimum aligned length (default by --organelle-mode)")
     p_sort.add_argument("--gap-n", type=int, default=None, help="Number of Ns between selected contigs (default by --organelle-mode)")
+    p_sort.add_argument(
+        "--min-non-n-len",
+        type=int,
+        default=0,
+        help="Minimum non-N length required to keep sample in assembled_samples.fasta (default: 0)",
+    )
     p_sort.set_defaults(func=cmd_sort_organ)
 
     p_pan = subs.add_parser(
@@ -2461,6 +2486,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection (default: 1000)")
     p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_pt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_pt.add_argument("--pt-single-ir", action="store_true", help="Reorder chloroplast output to LSC+singleIR+SSC")
     p_ch_pt.add_argument("--pt-keep-ir", default="auto", choices=["auto", "ira", "irb"], help="IR copy kept in single-IR mode")
     p_ch_pt.add_argument("--cp-regions", help="Region table from cpstools (LSC/SSC/IR coordinates)")
@@ -2490,6 +2516,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection (default: 3000)")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_mt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
     p_ch_mt.add_argument("--pangraph-args", nargs="*", default=[], help="Arguments passed to PanGraph")
@@ -2541,6 +2568,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_amt.add_argument("--min-len-mt", type=int, default=1000, help="Minimum length for mt contig selection (default: 1000)")
     p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_amt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_amt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_amt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_ch_amt.add_argument("--run-ml", action="store_true", help="Run ML tree after alignment")
