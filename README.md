@@ -244,11 +244,15 @@ OrganPath PhyView \
   -i organpath_out/trimmed.fasta \
   -o organpath_out/phyview_beast \
   --run_beast \
-  --beast-template /path/to/ultrametric_tree_template.xml \
+  --beast-template default \
   --beast-prefix mito_panel \
   --beast-chain-length 20000000 \
   --beast-store-every 5000
 ```
+
+`--beast-template` accepts either:
+- `default` (built-in template path in OrganPath)
+- a custom XML template path
 
 MSA to strict biallelic SNP VCF (for `assembled_samples.fasta`):
 

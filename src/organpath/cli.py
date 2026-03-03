@@ -30,6 +30,10 @@ ORG_SORT_DEFAULTS = {
     "plant_mt": {"min_identity": 0.95, "min_len": 3000, "gap_n": 100},
     "animal_mt": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
 }
+DEFAULT_BEAST_TEMPLATE = (
+    "/Users/zh384/Desktop/scripts_dev/pipelines/eDNA_phylogeny/Organelle_pipelineV2/"
+    "2_Construct_phylogentic_framework/auxiliary_scripts/ultrametric_tree_template.xml"
+)
 
 
 @dataclass
@@ -642,6 +646,12 @@ def run_beast_pipeline(
                 out_dir / f"{prefix}.mcc.nwk",
                 include_posterior=include_posterior,
             )
+
+
+def resolve_beast_template_arg(template_arg: str) -> Path:
+    if template_arg.strip().lower() == "default":
+        return Path(DEFAULT_BEAST_TEMPLATE).resolve()
+    return Path(template_arg).resolve()
 
 
 def run_phyview(
@@ -2523,10 +2533,13 @@ def cmd_phyview(args: argparse.Namespace) -> int:
     if args.run_beast:
         if not args.beast_template:
             raise ValueError("--beast-template is required with --run_beast")
+        beast_template = resolve_beast_template_arg(args.beast_template)
+        if not beast_template.exists():
+            raise FileNotFoundError(f"BEAST template not found: {beast_template}")
         run_beast_pipeline(
             aligned_fasta=trimmed,
             out_dir=out_dir,
-            template_xml=Path(args.beast_template).resolve(),
+            template_xml=beast_template,
             prefix=args.beast_prefix,
             chain_length=args.beast_chain_length,
             store_every=args.beast_store_every,
@@ -2729,7 +2742,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable IQ-TREE safe likelihood kernel (used with --run_ml; default uses -safe)",
     )
-    p_phy.add_argument("--beast-template", help="BEAST XML template path (required with --run_beast)")
+    p_phy.add_argument(
+        "--beast-template",
+        help="BEAST XML template path (required with --run_beast); use 'default' for built-in template",
+    )
     p_phy.add_argument("--beast-prefix", default="organpath_beast", help="Output prefix used by BEAST")
     p_phy.add_argument("--beast-old-prefix", default="ultrametric", help="Template prefix token to replace in BEAST XML")
     p_phy.add_argument("--beast-chain-length", type=int, default=20000000, help="BEAST MCMC chain length")
@@ -3148,7 +3164,10 @@ def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
         action="store_true",
         help="Disable IQ-TREE safe likelihood kernel (used with --run_ml; default uses -safe)",
     )
-    parser.add_argument("--beast-template", help="BEAST XML template path (required with --run_beast)")
+    parser.add_argument(
+        "--beast-template",
+        help="BEAST XML template path (required with --run_beast); use 'default' for built-in template",
+    )
     parser.add_argument("--beast-prefix", default="organpath_beast", help="Output prefix used by BEAST")
     parser.add_argument("--beast-old-prefix", default="ultrametric", help="Template prefix token to replace in BEAST XML")
     parser.add_argument("--beast-chain-length", type=int, default=20000000, help="BEAST MCMC chain length")
