@@ -1012,6 +1012,11 @@ def resolve_cp_regions(
     four_sec_1 = cp_out / "seed.four_sec.txt"
     with four_sec_1.open("wt") as out:
         subprocess.run([cpstools, "IR", "-i", str(seed_fa)], stdout=out, check=True)
+    seed_regions: Optional[Dict[str, Tuple[int, int]]] = None
+    try:
+        seed_regions = parse_cpstools_four_sec(four_sec_1)
+    except Exception:
+        seed_regions = None
 
     tmp_dir = cp_out / "cpstools_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1022,22 +1027,36 @@ def resolve_cp_regions(
     except Exception:
         shutil.copy2(seed_fa, link_path)
 
-    subprocess.run(
-        [cpstools, "Seq", "-d", str(tmp_dir), "-f", str(four_sec_1), "-m", "LSC"],
-        check=True,
-        cwd=str(cp_out),
-    )
-    lsc_adj_dir = cp_out / "LSC_adj"
-    lsc_candidates = sorted(lsc_adj_dir.glob("*.fa")) + sorted(lsc_adj_dir.glob("*.fasta"))
-    if not lsc_candidates:
-        raise FileNotFoundError(f"cpstools Seq did not produce LSC-adjusted fasta in: {lsc_adj_dir}")
-    lsc_seed = lsc_candidates[0]
+    regions: Optional[Dict[str, Tuple[int, int]]] = None
+    try:
+        subprocess.run(
+            [cpstools, "Seq", "-d", str(tmp_dir), "-f", str(four_sec_1), "-m", "LSC"],
+            check=True,
+            cwd=str(cp_out),
+        )
+        lsc_adj_dir = cp_out / "LSC_adj"
+        lsc_candidates = sorted(lsc_adj_dir.glob("*.fa")) + sorted(lsc_adj_dir.glob("*.fasta"))
+        if not lsc_candidates:
+            raise FileNotFoundError(f"cpstools Seq did not produce LSC-adjusted fasta in: {lsc_adj_dir}")
+        lsc_seed = lsc_candidates[0]
 
-    four_sec_2 = cp_out / "lsc_start.four_sec.txt"
-    with four_sec_2.open("wt") as out:
-        subprocess.run([cpstools, "IR", "-i", str(lsc_seed)], stdout=out, check=True)
+        four_sec_2 = cp_out / "lsc_start.four_sec.txt"
+        with four_sec_2.open("wt") as out:
+            subprocess.run([cpstools, "IR", "-i", str(lsc_seed)], stdout=out, check=True)
+        regions = parse_cpstools_four_sec(four_sec_2)
+    except Exception as exc:
+        if seed_regions is None:
+            raise RuntimeError(
+                "cpstools default workflow failed and fallback parsing of `cpstools IR` output also failed. "
+                "Please provide --cp-regions."
+            ) from exc
+        logger.warning(
+            "cpstools Seq workflow failed (%s). Falling back to seed IR coordinates from: %s",
+            str(exc),
+            four_sec_1,
+        )
+        regions = seed_regions
 
-    regions = parse_cpstools_four_sec(four_sec_2)
     with cp_regions_tsv.open("wt") as out:
         out.write("region\tstart\tend\n")
         for k in ("LSC", "IRB", "IRA", "SSC"):
