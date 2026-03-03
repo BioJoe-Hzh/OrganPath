@@ -7,6 +7,8 @@ import subprocess
 import sys
 import importlib.util
 import re
+from xml.etree import ElementTree as ET
+import xml.dom.minidom as minidom
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -458,6 +460,10 @@ def ensure_tool(name: str) -> str:
             "trimal": "Please install trimAl and ensure `trimal` is in PATH.",
             "iqtree": "Please install IQ-TREE (iqtree/iqtree2) and ensure it is in PATH.",
             "iqtree2": "Please install IQ-TREE (iqtree/iqtree2) and ensure it is in PATH.",
+            "snp-sites": "Please install snp-sites and ensure `snp-sites` is in PATH.",
+            "bcftools": "Please install bcftools and ensure `bcftools` is in PATH.",
+            "beast": "Please install BEAST2 and ensure `beast` is in PATH.",
+            "treeannotator": "Please install BEAST2 tools and ensure `treeannotator` is in PATH.",
         }.get(name, f"Please install `{name}` and add it to PATH.")
         raise RuntimeError(f"Required tool not found in PATH: {name}. {install_hint}")
     return p
@@ -468,6 +474,174 @@ def run_alignment_and_trimming(
 ) -> None:
     run_command([mafft_bin, "--auto", str(multifasta)], stdout_path=aligned)
     run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(trimmed)])
+
+
+def run_alignment_with_direction(
+    multifasta: Path, aligned: Path, mafft_bin: str, adjust_direction: bool
+) -> None:
+    cmd = [mafft_bin, "--auto"]
+    if adjust_direction:
+        cmd.append("--adjustdirectionaccurately")
+    cmd.append(str(multifasta))
+    run_command(cmd, stdout_path=aligned)
+
+
+def write_ref_from_msa(msa_fa: Path, out_ref: Path, ref_id: Optional[str]) -> str:
+    seqs = read_fasta_sequences(msa_fa)
+    if ref_id:
+        if ref_id not in seqs:
+            raise ValueError(f"--ref-id not found in MSA: {ref_id}")
+        chosen = ref_id
+    else:
+        chosen = next(iter(seqs.keys()))
+    with out_ref.open("wt") as out:
+        out.write(f">{chosen}\n{seqs[chosen]}\n")
+    return chosen
+
+
+def _strip_beast_annotations(newick: str, include_posterior: bool) -> str:
+    if include_posterior:
+        def repl(m: re.Match) -> str:
+            payload = m.group(1)
+            pm = re.search(r"posterior=([0-9eE.+-]+)", payload)
+            return pm.group(1) if pm else ""
+        return re.sub(r"\[&([^\]]+)\]", repl, newick)
+    return re.sub(r"\[&[^\]]+\]", "", newick)
+
+
+def nexus_tree_to_newick(nexus_path: Path, out_newick: Path, include_posterior: bool) -> None:
+    tree_txt: Optional[str] = None
+    pat = re.compile(r"^\s*tree\s+.+?=\s*(.+)$", flags=re.IGNORECASE)
+    with nexus_path.open("rt") as fh:
+        for raw in fh:
+            m = pat.match(raw.strip())
+            if m:
+                tree_txt = m.group(1).strip()
+    if not tree_txt:
+        raise ValueError(f"No tree line found in NEXUS: {nexus_path}")
+    cleaned = _strip_beast_annotations(tree_txt, include_posterior=include_posterior)
+    if not cleaned.endswith(";"):
+        cleaned += ";"
+    out_newick.write_text(cleaned + "\n")
+
+
+def build_beast_xml_from_template(
+    template_xml: Path,
+    aligned_fasta: Path,
+    output_xml: Path,
+    prefix: str,
+    chain_length: int,
+    store_every: int,
+    old_prefix: str = "ultrametric",
+) -> None:
+    xml_content = template_xml.read_text(encoding="utf-8")
+    m = re.match(r'<\?xml.*?\?>', xml_content)
+    xml_decl = m.group(0) if m else '<?xml version="1.0" encoding="UTF-8" standalone="no"?>'
+    tree = ET.ElementTree(ET.fromstring(xml_content))
+    root = tree.getroot()
+
+    for elem in root.iter():
+        for k, v in list(elem.attrib.items()):
+            if old_prefix in v:
+                elem.set(k, re.sub(rf'([:@.]?){re.escape(old_prefix)}', rf"\1{prefix}", v))
+
+    run_elem = root.find(".//run[@id='mcmc']")
+    if run_elem is not None:
+        run_elem.set("chainLength", str(chain_length))
+        run_elem.set("storeEvery", str(store_every))
+
+    data_block = root.find(f".//data[@id='{prefix}']")
+    if data_block is None:
+        data_block = root.find(".//data")
+    if data_block is None:
+        raise ValueError("BEAST template has no <data> block.")
+
+    for child in list(data_block):
+        data_block.remove(child)
+    seqs = read_fasta_sequences(aligned_fasta)
+    for sid, seq in seqs.items():
+        seq_elem = ET.SubElement(data_block, "sequence")
+        seq_elem.set("id", f"seq_{sid}")
+        seq_elem.set("spec", "Sequence")
+        seq_elem.set("taxon", sid)
+        seq_elem.set("totalcount", "4")
+        seq_elem.set("value", seq)
+
+    xml_str = ET.tostring(tree.getroot(), encoding="UTF-8")
+    parsed = minidom.parseString(xml_str)
+    pretty = parsed.toprettyxml(indent="  ")
+    pretty = pretty.split("\n", 1)[1] if pretty.startswith("<?xml") else pretty
+    output_xml.write_text(f"{xml_decl}\n{pretty}", encoding="utf-8")
+
+
+def run_beast_pipeline(
+    aligned_fasta: Path,
+    out_dir: Path,
+    template_xml: Path,
+    prefix: str,
+    chain_length: int,
+    store_every: int,
+    beast_bin: str,
+    beast_threads: int,
+    use_beagle: bool,
+    treeannotator_bin: str,
+    run_treeannotator: bool,
+    burnin: int,
+    heights: str,
+    include_posterior: bool,
+    old_prefix: str = "ultrametric",
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    xml_out = out_dir / f"{prefix}.beast.xml"
+    build_beast_xml_from_template(
+        template_xml=template_xml,
+        aligned_fasta=aligned_fasta,
+        output_xml=xml_out,
+        prefix=prefix,
+        chain_length=chain_length,
+        store_every=store_every,
+        old_prefix=old_prefix,
+    )
+
+    beast = ensure_tool(beast_bin)
+    beast_cmd = [beast]
+    if use_beagle:
+        beast_cmd.append("-beagle")
+    beast_cmd += [
+        "-threads",
+        str(beast_threads),
+        "-prefix",
+        str(out_dir / prefix),
+        "-overwrite",
+        str(xml_out),
+    ]
+    run_command(beast_cmd)
+
+    tree_file = out_dir / f"{prefix}.trees"
+    if not tree_file.exists():
+        logger.warning("BEAST run finished, but tree file not found: %s", tree_file)
+        return
+
+    if run_treeannotator:
+        ta = ensure_tool(treeannotator_bin)
+        mcc_nexus = out_dir / f"{prefix}.mcc.nexus"
+        run_command(
+            [
+                ta,
+                "-burnin",
+                str(burnin),
+                "-heights",
+                heights,
+                str(tree_file),
+                str(mcc_nexus),
+            ]
+        )
+        if mcc_nexus.exists():
+            nexus_tree_to_newick(
+                mcc_nexus,
+                out_dir / f"{prefix}.mcc.nwk",
+                include_posterior=include_posterior,
+            )
 
 
 def run_phyview(
@@ -2074,12 +2248,105 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_msa2vcf(args: argparse.Namespace) -> int:
+    in_fa = Path(args.input).resolve()
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not in_fa.exists():
+        raise FileNotFoundError(f"input fasta not found: {in_fa}")
+
+    mafft_bin = ensure_tool(args.mafft_bin)
+    trimal_bin = ensure_tool(args.trimal_bin) if args.trim else args.trimal_bin
+    snp_sites = ensure_tool(args.snp_sites_bin)
+    bcftools = ensure_tool(args.bcftools_bin)
+
+    aligned = out_dir / "aligned.auto_rc.fasta"
+    run_alignment_with_direction(
+        multifasta=in_fa,
+        aligned=aligned,
+        mafft_bin=mafft_bin,
+        adjust_direction=args.auto_reverse,
+    )
+
+    msa_for_vcf = aligned
+    trimmed = out_dir / "aligned.auto_rc.trimmed.fasta"
+    if args.trim:
+        run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(trimmed)])
+        msa_for_vcf = trimmed
+
+    if args.norm_ref:
+        norm_ref = Path(args.norm_ref).resolve()
+        if not norm_ref.exists():
+            raise FileNotFoundError(f"--norm-ref not found: {norm_ref}")
+    else:
+        norm_ref = out_dir / "norm_ref.fasta"
+        chosen = write_ref_from_msa(msa_for_vcf, norm_ref, ref_id=args.ref_id)
+        logger.info("Normalization reference selected from MSA: %s", chosen)
+
+    raw_vcf = out_dir / "raw.snpsites.vcf"
+    run_command([snp_sites, "-v", str(msa_for_vcf)], stdout_path=raw_vcf)
+
+    atomized = out_dir / "atomized.vcf.gz"
+    split = out_dir / "split.multiallelic.vcf.gz"
+    biallelic = out_dir / "biallelic.snps.vcf.gz"
+
+    run_command(
+        [
+            bcftools,
+            "norm",
+            "-f",
+            str(norm_ref),
+            "-a",
+            "--atom-overlaps",
+            ".",
+            str(raw_vcf),
+            "-Oz",
+            "-o",
+            str(atomized),
+        ]
+    )
+    run_command([bcftools, "index", "-t", str(atomized)])
+
+    run_command(
+        [
+            bcftools,
+            "norm",
+            "-m",
+            "-any",
+            str(atomized),
+            "-Oz",
+            "-o",
+            str(split),
+        ]
+    )
+    run_command([bcftools, "index", "-t", str(split)])
+
+    run_command(
+        [
+            bcftools,
+            "view",
+            "-v",
+            "snps",
+            "-m2",
+            "-M2",
+            str(split),
+            "-Oz",
+            "-o",
+            str(biallelic),
+        ]
+    )
+    run_command([bcftools, "index", "-t", str(biallelic)])
+
+    logger.info("MSA2VCF completed. Outputs: %s", out_dir)
+    return 0
+
+
 def cmd_phyview(args: argparse.Namespace) -> int:
     trimmed = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
-    mode_count = int(args.run_ml) + int(args.run_nj) + int(args.run_popart)
+    mode_count = int(args.run_ml) + int(args.run_nj) + int(args.run_popart) + int(args.run_beast)
     if mode_count != 1:
-        raise ValueError("PhyView requires exactly one mode: --run_ml or --run_nj or --run_popart")
+        raise ValueError("PhyView requires exactly one mode: --run_ml or --run_nj or --run_popart or --run_beast")
     if args.exec_popart and not args.run_popart:
         raise ValueError("--exec-popart is only valid together with --run_popart")
 
@@ -2110,6 +2377,29 @@ def cmd_phyview(args: argparse.Namespace) -> int:
         if args.exec_popart:
             run_popart_cli(args.popart_bin, popart_nex, out_dir, args.popart_args)
         logger.info("PhyView completed (PopART inputs): %s", out_dir)
+        return 0
+
+    if args.run_beast:
+        if not args.beast_template:
+            raise ValueError("--beast-template is required with --run_beast")
+        run_beast_pipeline(
+            aligned_fasta=trimmed,
+            out_dir=out_dir,
+            template_xml=Path(args.beast_template).resolve(),
+            prefix=args.beast_prefix,
+            chain_length=args.beast_chain_length,
+            store_every=args.beast_store_every,
+            beast_bin=args.beast_bin,
+            beast_threads=args.beast_threads,
+            use_beagle=args.beast_beagle,
+            treeannotator_bin=args.treeannotator_bin,
+            run_treeannotator=args.run_treeannotator,
+            burnin=args.beast_burnin,
+            heights=args.beast_heights,
+            include_posterior=args.include_posterior,
+            old_prefix=args.beast_old_prefix,
+        )
+        logger.info("PhyView completed (BEAST): %s", out_dir)
         return 0
 
     logger.info("PhyView completed: %s", out_dir)
@@ -2262,6 +2552,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
     mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")
     mode_group.add_argument("--run_popart", "--run-popart", action="store_true", help="Prepare PopART haplotype inputs")
+    mode_group.add_argument("--run_beast", "--run-beast", action="store_true", help="Run BEAST tree inference from input alignment")
     p_phy.add_argument(
         "--exec-popart",
         action="store_true",
@@ -2279,7 +2570,36 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable IQ-TREE safe likelihood kernel (used with --run_ml; default uses -safe)",
     )
+    p_phy.add_argument("--beast-template", help="BEAST XML template path (required with --run_beast)")
+    p_phy.add_argument("--beast-prefix", default="organpath_beast", help="Output prefix used by BEAST")
+    p_phy.add_argument("--beast-old-prefix", default="ultrametric", help="Template prefix token to replace in BEAST XML")
+    p_phy.add_argument("--beast-chain-length", type=int, default=20000000, help="BEAST MCMC chain length")
+    p_phy.add_argument("--beast-store-every", type=int, default=5000, help="BEAST storeEvery interval")
+    p_phy.add_argument("--beast-bin", default="beast", help="BEAST executable name/path")
+    p_phy.add_argument("--beast-threads", type=int, default=8, help="Threads for BEAST")
+    p_phy.add_argument("--beast-beagle", action="store_true", help="Enable BEAGLE for BEAST run")
+    p_phy.add_argument("--run-treeannotator", action=argparse.BooleanOptionalAction, default=True, help="Run treeannotator on BEAST .trees output")
+    p_phy.add_argument("--treeannotator-bin", default="treeannotator", help="treeannotator executable name/path")
+    p_phy.add_argument("--beast-burnin", type=int, default=10, help="Burn-in percentage for treeannotator")
+    p_phy.add_argument("--beast-heights", default="median", help="treeannotator node heights mode")
+    p_phy.add_argument("--include-posterior", action="store_true", help="Keep posterior as internal labels in BEAST Newick output")
     p_phy.set_defaults(func=cmd_phyview)
+
+    p_m2v = subs.add_parser(
+        "MSA2VCF",
+        help="Align multifasta with MAFFT (auto reverse-complement) and build strict biallelic SNP VCF",
+    )
+    p_m2v.add_argument("-i", "--input", required=True, help="Input multifasta (e.g. assembled_samples.fasta)")
+    p_m2v.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_m2v.add_argument("--mafft-bin", default="mafft", help="MAFFT executable name/path")
+    p_m2v.add_argument("--auto-reverse", action=argparse.BooleanOptionalAction, default=True, help="Use MAFFT --adjustdirectionaccurately")
+    p_m2v.add_argument("--trim", action="store_true", help="Trim aligned MSA with trimAl before VCF conversion")
+    p_m2v.add_argument("--trimal-bin", default="trimal", help="trimAl executable name/path")
+    p_m2v.add_argument("--snp-sites-bin", default="snp-sites", help="snp-sites executable name/path")
+    p_m2v.add_argument("--bcftools-bin", default="bcftools", help="bcftools executable name/path")
+    p_m2v.add_argument("--norm-ref", help="Reference fasta for bcftools norm -f (default: first MSA sequence)")
+    p_m2v.add_argument("--ref-id", help="Reference sequence ID from MSA when --norm-ref is not provided")
+    p_m2v.set_defaults(func=cmd_msa2vcf)
 
     p_rename = subs.add_parser(
         "RenameTree",
@@ -2618,6 +2938,7 @@ def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
     mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
     mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")
     mode_group.add_argument("--run_popart", "--run-popart", action="store_true", help="Prepare PopART haplotype inputs")
+    mode_group.add_argument("--run_beast", "--run-beast", action="store_true", help="Run BEAST tree inference from input alignment")
     parser.add_argument(
         "--exec-popart",
         action="store_true",
@@ -2635,6 +2956,19 @@ def phyview_main(argv: Optional[Iterable[str]] = None) -> int:
         action="store_true",
         help="Disable IQ-TREE safe likelihood kernel (used with --run_ml; default uses -safe)",
     )
+    parser.add_argument("--beast-template", help="BEAST XML template path (required with --run_beast)")
+    parser.add_argument("--beast-prefix", default="organpath_beast", help="Output prefix used by BEAST")
+    parser.add_argument("--beast-old-prefix", default="ultrametric", help="Template prefix token to replace in BEAST XML")
+    parser.add_argument("--beast-chain-length", type=int, default=20000000, help="BEAST MCMC chain length")
+    parser.add_argument("--beast-store-every", type=int, default=5000, help="BEAST storeEvery interval")
+    parser.add_argument("--beast-bin", default="beast", help="BEAST executable name/path")
+    parser.add_argument("--beast-threads", type=int, default=8, help="Threads for BEAST")
+    parser.add_argument("--beast-beagle", action="store_true", help="Enable BEAGLE for BEAST run")
+    parser.add_argument("--run-treeannotator", action=argparse.BooleanOptionalAction, default=True, help="Run treeannotator on BEAST .trees output")
+    parser.add_argument("--treeannotator-bin", default="treeannotator", help="treeannotator executable name/path")
+    parser.add_argument("--beast-burnin", type=int, default=10, help="Burn-in percentage for treeannotator")
+    parser.add_argument("--beast-heights", default="median", help="treeannotator node heights mode")
+    parser.add_argument("--include-posterior", action="store_true", help="Keep posterior as internal labels in BEAST Newick output")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args(list(argv) if argv is not None else None)
 

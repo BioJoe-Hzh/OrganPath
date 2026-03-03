@@ -25,6 +25,9 @@ python -m pip install -e .
 - `mafft`
 - `trimal`
 - `iqtree2` (preferred; fallback to `iqtree`)
+- `snp-sites` (for MSA -> VCF)
+- `bcftools` (for atomize/split/filter SNP VCF)
+- `beast` + `treeannotator` (optional, for BEAST tree mode)
 
 Python dependency:
 - `biopython` (for NJ tree construction)
@@ -200,7 +203,35 @@ OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview_popart
 
 # Optional: execute PopART CLI after preparing input files:
 OrganPath PhyView -i organpath_out/trimmed.fasta -o organpath_out/phyview_popart --run_popart --exec-popart --popart-bin popart
+
+# 4) BEAST tree mode (from aligned/trimmed fasta):
+OrganPath PhyView \
+  -i organpath_out/trimmed.fasta \
+  -o organpath_out/phyview_beast \
+  --run_beast \
+  --beast-template /path/to/ultrametric_tree_template.xml \
+  --beast-prefix mito_panel \
+  --beast-chain-length 20000000 \
+  --beast-store-every 5000
 ```
+
+MSA to strict biallelic SNP VCF (for `assembled_samples.fasta`):
+
+```bash
+OrganPath MSA2VCF \
+  -i out_pt/sortOrgan/assembled_samples.fasta \
+  -o out_pt/msa2vcf \
+  --auto-reverse \
+  --trim
+```
+
+This command performs:
+1. MAFFT alignment with auto reverse-complement detection (`--adjustdirectionaccurately`)
+2. optional trimAl
+3. `snp-sites -v` to generate raw VCF from MSA
+4. `bcftools norm -a` to atomize complex/MNV records
+5. `bcftools norm -m -any` to split multi-allelic records
+6. keep only biallelic SNPs (`bcftools view -v snps -m2 -M2`)
 
 Rename IDs in an existing tree only:
 
