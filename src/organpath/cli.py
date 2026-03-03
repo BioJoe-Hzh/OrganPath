@@ -2570,6 +2570,57 @@ def write_partition_sample_stats(partition_fastas: Dict[str, Path], out_tsv: Pat
                 out.write(f"{pname}\t{sid}\t{total}\t{non_miss}\t{miss_frac:.6f}\n")
 
 
+def filter_partition_samples_by_missing(
+    partition_fastas: Dict[str, Path],
+    out_dir: Path,
+    max_missing_frac: float,
+) -> Dict[str, Path]:
+    raw: Dict[str, Dict[str, str]] = {p: read_fasta_sequences(partition_fastas[p]) for p in ("LSC", "IR", "SSC")}
+    all_ids = sorted(set(raw["LSC"]) | set(raw["IR"]) | set(raw["SSC"]))
+    miss: Dict[str, Dict[str, float]] = {sid: {} for sid in all_ids}
+    keep_ids: List[str] = []
+    report = out_dir / "partition_sample_filter.tsv"
+    with report.open("wt") as rep:
+        rep.write("sample\tLSC_missing\tIR_missing\tSSC_missing\tkeep\n")
+        for sid in all_ids:
+            ok = True
+            for pname in ("LSC", "IR", "SSC"):
+                seq = raw[pname].get(sid, "")
+                if not seq:
+                    m = 1.0
+                else:
+                    total = len(seq)
+                    ms = sum(1 for c in seq if c in "Nn-?")
+                    m = ms / total if total > 0 else 1.0
+                miss[sid][pname] = m
+                if m > max_missing_frac:
+                    ok = False
+            if ok:
+                keep_ids.append(sid)
+            rep.write(
+                f"{sid}\t{miss[sid]['LSC']:.6f}\t{miss[sid]['IR']:.6f}\t{miss[sid]['SSC']:.6f}\t"
+                f"{'KEEP' if ok else 'DROP'}\n"
+            )
+
+    if not keep_ids:
+        raise ValueError(f"No samples left after partition missing filter (threshold={max_missing_frac}).")
+
+    out_paths: Dict[str, Path] = {}
+    for pname in ("LSC", "IR", "SSC"):
+        out_p = out_dir / f"{pname}.aligned.filtered.fasta"
+        out_paths[pname] = out_p
+        kept = {sid: raw[pname][sid] for sid in keep_ids if sid in raw[pname]}
+        write_fasta_sequences(out_p, kept)
+    logger.info(
+        "Partition sample filter kept %d/%d samples at threshold %.3f. Report: %s",
+        len(keep_ids),
+        len(all_ids),
+        max_missing_frac,
+        report,
+    )
+    return out_paths
+
+
 def cmd_align(args: argparse.Namespace) -> int:
     in_fa = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
@@ -2616,16 +2667,30 @@ def cmd_align(args: argparse.Namespace) -> int:
             adjust_direction=args.auto_reverse,
             threads=args.threads,
         )
-        concatenate_three_partition_alignments(lsc_aln=lsc_aln, ir_aln=ir_aln, ssc_aln=ssc_aln, out_fa=aligned)
+        write_partition_sample_stats(
+            partition_fastas={"LSC": lsc_aln, "IR": ir_aln, "SSC": ssc_aln},
+            out_tsv=out_dir / "partition_sample_stats.aligned.tsv",
+        )
+        filtered_aln = filter_partition_samples_by_missing(
+            partition_fastas={"LSC": lsc_aln, "IR": ir_aln, "SSC": ssc_aln},
+            out_dir=out_dir,
+            max_missing_frac=args.partition_max_missing_frac,
+        )
+        concatenate_three_partition_alignments(
+            lsc_aln=filtered_aln["LSC"],
+            ir_aln=filtered_aln["IR"],
+            ssc_aln=filtered_aln["SSC"],
+            out_fa=aligned,
+        )
 
         if args.trim:
             trimal_bin = ensure_tool(args.trimal_bin)
             lsc_pre = out_dir / "LSC.trimmed.pre.fasta"
             ir_pre = out_dir / "IR.trimmed.pre.fasta"
             ssc_pre = out_dir / "SSC.trimmed.pre.fasta"
-            run_command([trimal_bin, "-automated1", "-in", str(lsc_aln), "-out", str(lsc_pre)])
-            run_command([trimal_bin, "-automated1", "-in", str(ir_aln), "-out", str(ir_pre)])
-            run_command([trimal_bin, "-automated1", "-in", str(ssc_aln), "-out", str(ssc_pre)])
+            run_command([trimal_bin, "-automated1", "-in", str(filtered_aln["LSC"]), "-out", str(lsc_pre)])
+            run_command([trimal_bin, "-automated1", "-in", str(filtered_aln["IR"]), "-out", str(ir_pre)])
+            run_command([trimal_bin, "-automated1", "-in", str(filtered_aln["SSC"]), "-out", str(ssc_pre)])
 
             trimmed_pre = out_dir / "trimmed.pre.fasta"
             concatenate_three_partition_alignments(
@@ -2687,7 +2752,7 @@ def cmd_align(args: argparse.Namespace) -> int:
             logger.info("Align completed (partition mode): %s, %s", aligned, trimmed)
         else:
             write_partition_sample_stats(
-                partition_fastas={"LSC": lsc_aln, "IR": ir_aln, "SSC": ssc_aln},
+                partition_fastas=filtered_aln,
                 out_tsv=out_dir / "partition_sample_stats.tsv",
             )
             logger.info("Align completed (partition mode): %s", aligned)
@@ -3055,6 +3120,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_align.add_argument(
         "--partition-dir",
         help="Partition directory containing LSC_samples.fasta, IR_samples.fasta, SSC_samples.fasta",
+    )
+    p_align.add_argument(
+        "--partition-max-missing-frac",
+        type=float,
+        default=0.2,
+        help="In --plant-pt-partition mode, drop a sample if any partition missing fraction exceeds this threshold (applied right after MAFFT)",
     )
     p_align.set_defaults(func=cmd_align)
 
