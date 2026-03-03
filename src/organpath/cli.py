@@ -2555,6 +2555,21 @@ def concatenate_three_partition_alignments(
             )
 
 
+def write_partition_sample_stats(partition_fastas: Dict[str, Path], out_tsv: Path) -> None:
+    with out_tsv.open("wt") as out:
+        out.write("partition\tsample\tlen\tnon_missing\tmissing_frac\n")
+        for pname in ("LSC", "IR", "SSC"):
+            pfa = partition_fastas[pname]
+            seqs = read_fasta_sequences(pfa)
+            for sid in sorted(seqs.keys()):
+                seq = seqs[sid]
+                total = len(seq)
+                miss = sum(1 for c in seq if c in "Nn-?")
+                non_miss = total - miss
+                miss_frac = (miss / total) if total > 0 else 1.0
+                out.write(f"{pname}\t{sid}\t{total}\t{non_miss}\t{miss_frac:.6f}\n")
+
+
 def cmd_align(args: argparse.Namespace) -> int:
     in_fa = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
@@ -2602,6 +2617,81 @@ def cmd_align(args: argparse.Namespace) -> int:
             threads=args.threads,
         )
         concatenate_three_partition_alignments(lsc_aln=lsc_aln, ir_aln=ir_aln, ssc_aln=ssc_aln, out_fa=aligned)
+
+        if args.trim:
+            trimal_bin = ensure_tool(args.trimal_bin)
+            lsc_pre = out_dir / "LSC.trimmed.pre.fasta"
+            ir_pre = out_dir / "IR.trimmed.pre.fasta"
+            ssc_pre = out_dir / "SSC.trimmed.pre.fasta"
+            run_command([trimal_bin, "-automated1", "-in", str(lsc_aln), "-out", str(lsc_pre)])
+            run_command([trimal_bin, "-automated1", "-in", str(ir_aln), "-out", str(ir_pre)])
+            run_command([trimal_bin, "-automated1", "-in", str(ssc_aln), "-out", str(ssc_pre)])
+
+            trimmed_pre = out_dir / "trimmed.pre.fasta"
+            concatenate_three_partition_alignments(
+                lsc_aln=lsc_pre,
+                ir_aln=ir_pre,
+                ssc_aln=ssc_pre,
+                out_fa=trimmed_pre,
+            )
+
+            lsc_trim = out_dir / "LSC.trimmed.fasta"
+            ir_trim = out_dir / "IR.trimmed.fasta"
+            ssc_trim = out_dir / "SSC.trimmed.fasta"
+            if args.max_missing_frac < 1.0 or args.snp_only:
+                k1, t1 = filter_alignment_sites(
+                    in_fa=lsc_pre,
+                    out_fa=lsc_trim,
+                    max_missing_frac=args.max_missing_frac,
+                    snp_only=args.snp_only,
+                )
+                k2, t2 = filter_alignment_sites(
+                    in_fa=ir_pre,
+                    out_fa=ir_trim,
+                    max_missing_frac=args.max_missing_frac,
+                    snp_only=args.snp_only,
+                )
+                k3, t3 = filter_alignment_sites(
+                    in_fa=ssc_pre,
+                    out_fa=ssc_trim,
+                    max_missing_frac=args.max_missing_frac,
+                    snp_only=args.snp_only,
+                )
+                logger.info(
+                    "Partition post-trim filters kept LSC %d/%d, IR %d/%d, SSC %d/%d columns (missing<=%.3f, snp_only=%s).",
+                    k1,
+                    t1,
+                    k2,
+                    t2,
+                    k3,
+                    t3,
+                    args.max_missing_frac,
+                    args.snp_only,
+                )
+            else:
+                shutil.copyfile(lsc_pre, lsc_trim)
+                shutil.copyfile(ir_pre, ir_trim)
+                shutil.copyfile(ssc_pre, ssc_trim)
+
+            trimmed = out_dir / "trimmed.fasta"
+            concatenate_three_partition_alignments(
+                lsc_aln=lsc_trim,
+                ir_aln=ir_trim,
+                ssc_aln=ssc_trim,
+                out_fa=trimmed,
+            )
+            write_partition_sample_stats(
+                partition_fastas={"LSC": lsc_trim, "IR": ir_trim, "SSC": ssc_trim},
+                out_tsv=out_dir / "partition_sample_stats.tsv",
+            )
+            logger.info("Align completed (partition mode): %s, %s", aligned, trimmed)
+        else:
+            write_partition_sample_stats(
+                partition_fastas={"LSC": lsc_aln, "IR": ir_aln, "SSC": ssc_aln},
+                out_tsv=out_dir / "partition_sample_stats.tsv",
+            )
+            logger.info("Align completed (partition mode): %s", aligned)
+        return 0
     else:
         run_alignment_with_direction(
             multifasta=in_fa,

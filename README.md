@@ -145,6 +145,12 @@ OrganPath align \
   --trim
 ```
 
+In partition mode, OrganPath now does:
+- MAFFT on `LSC/IR/SSC` separately
+- trim/filter each partition separately
+- concatenate partitions to final `aligned.fasta` and `trimmed.fasta`
+- write `partition_sample_stats.tsv` with per-sample/per-partition missing rate and non-missing length
+
 Step 4 (Panel): ML tree from trimmed alignment:
 
 ```bash
