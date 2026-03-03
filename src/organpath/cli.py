@@ -2815,8 +2815,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_align.add_argument(
         "--auto-reverse",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use MAFFT --adjustdirectionaccurately to auto-handle reverse-complement sequences",
+        default=False,
+        help="Use MAFFT --adjustdirectionaccurately to auto-handle reverse-complement sequences (default: off)",
     )
     p_align.add_argument(
         "--trim",

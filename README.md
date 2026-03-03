@@ -129,7 +129,6 @@ OrganPath align \
   -i sortorgan_out/assembled_samples.fasta \
   -o align_out \
   --threads 24 \
-  --auto-reverse \
   --trim
 ```
 
