@@ -1084,33 +1084,43 @@ def resolve_cp_regions(
     return regions
 
 
-def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
-    contig = None
-    # Prefer GetOrganelle path sequences (usually best resolved circular path candidates).
+def discover_sample_candidates(sample_dir: Path) -> Tuple[List[Path], Optional[Path], str]:
+    # Prefer GetOrganelle path sequences (best circular candidates).
+    path_cands: List[Path] = []
     for pat in (
         "*path_sequence*.fasta",
         "*path_sequence*.fa",
         "*scaffolds.graph*.fasta",
         "*scaffolds.graph*.fa",
     ):
-        cands = sorted(sample_dir.rglob(pat))
-        if cands:
-            contig = cands[0]
-            break
-    if contig is not None:
-        fastg_cands = sorted(sample_dir.rglob("*.fastg"))
-        fastg = fastg_cands[0] if fastg_cands else None
-        return contig, fastg
-
-    # Fallback to SPAdes/GetOrganelle contigs.
-    for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
-        cands = sorted(sample_dir.rglob(pat))
-        if cands:
-            contig = cands[0]
-            break
+        path_cands.extend(sorted(sample_dir.rglob(pat)))
+    # de-dup while preserving order
+    seen = set()
+    uniq_path_cands = []
+    for p in path_cands:
+        sp = str(p)
+        if sp in seen:
+            continue
+        seen.add(sp)
+        uniq_path_cands.append(p)
     fastg_cands = sorted(sample_dir.rglob("*.fastg"))
     fastg = fastg_cands[0] if fastg_cands else None
-    return contig, fastg
+    if uniq_path_cands:
+        return uniq_path_cands, fastg, "path_sequence"
+
+    # Fallback to SPAdes/GetOrganelle contigs.
+    contig_cands: List[Path] = []
+    for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
+        contig_cands.extend(sorted(sample_dir.rglob(pat)))
+    seen = set()
+    uniq_contigs = []
+    for p in contig_cands:
+        sp = str(p)
+        if sp in seen:
+            continue
+        seen.add(sp)
+        uniq_contigs.append(p)
+    return uniq_contigs, fastg, "contigs"
 
 
 def parse_minimap2_paf(
@@ -1179,6 +1189,122 @@ def choose_best_hits(
     return selected
 
 
+def map_hits_for_candidate(
+    contig_fa: Path,
+    seed_fa: Path,
+    min_identity: float,
+    min_len: int,
+    aligner: str,
+    tmp_prefix: Path,
+) -> Tuple[List[Tuple[str, int, int, str, float, int, int, int]], str]:
+    tool = aligner
+    if tool == "auto":
+        tool = "minimap2" if shutil.which("minimap2") else "blastn"
+
+    tmp = tmp_prefix.with_suffix(".align.tmp")
+    if tool == "minimap2":
+        if not shutil.which("minimap2"):
+            raise RuntimeError("minimap2 not found in PATH.")
+        with tmp.open("wt") as out:
+            subprocess.run(
+                ["minimap2", "-x", "asm5", str(seed_fa), str(contig_fa)],
+                stdout=out,
+                check=True,
+            )
+        hits = parse_minimap2_paf(tmp, min_identity=min_identity, min_len=min_len)
+    elif tool == "blastn":
+        if not shutil.which("blastn"):
+            raise RuntimeError("blastn not found in PATH.")
+        with tmp.open("wt") as out:
+            subprocess.run(
+                [
+                    "blastn",
+                    "-query",
+                    str(contig_fa),
+                    "-subject",
+                    str(seed_fa),
+                    "-outfmt",
+                    "6 qseqid sstart send length pident bitscore qstart qend",
+                ],
+                stdout=out,
+                check=True,
+            )
+        hits = parse_blast_tab(tmp, min_identity=min_identity, min_len=min_len)
+    else:
+        raise ValueError(f"Unsupported aligner: {aligner}")
+    try:
+        tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return choose_best_hits(hits), tool
+
+
+def canonical_fasta_key(path: Path) -> str:
+    seqs = read_fasta_sequences(path)
+    if not seqs:
+        return ""
+    seq = "".join(seqs.values()).upper()
+    rc = reverse_complement(seq)
+    return seq if seq <= rc else rc
+
+
+def select_best_candidate_fasta(
+    candidates: List[Path],
+    seed_fa: Path,
+    sample_name: str,
+    sample_out: Path,
+    min_identity: float,
+    min_len: int,
+    aligner: str,
+    expected_len: Optional[int],
+) -> Tuple[Path, int]:
+    unique: List[Path] = []
+    seen_keys = set()
+    for p in candidates:
+        key = canonical_fasta_key(p)
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        unique.append(p)
+    if not unique:
+        raise ValueError("No usable candidate fasta files found.")
+    if len(unique) == 1:
+        return unique[0], 1
+
+    best_path: Optional[Path] = None
+    best_score: Optional[Tuple[float, float, int, int]] = None
+    for i, cand in enumerate(unique, start=1):
+        try:
+            chosen, _tool = map_hits_for_candidate(
+                contig_fa=cand,
+                seed_fa=seed_fa,
+                min_identity=min_identity,
+                min_len=min_len,
+                aligner=aligner,
+                tmp_prefix=sample_out / f"{sample_name}.cand{i}",
+            )
+        except Exception:
+            chosen = []
+        if not chosen:
+            score = (0.0, 0.0, 0, -10**9)
+        else:
+            best_alen = max(h[5] for h in chosen)
+            best_ident = max(h[4] for h in chosen)
+            total_alen = sum(h[5] for h in chosen)
+            cseq_len = sum(len(s) for s in read_fasta_sequences(cand).values())
+            closeness = 0
+            if expected_len and expected_len > 0:
+                closeness = -abs(cseq_len - expected_len)
+            score = (float(best_alen), float(best_ident), int(total_alen), int(closeness))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_path = cand
+    if best_path is None:
+        return unique[0], len(unique)
+    return best_path, len(unique)
+
+
 def slice_query_segment(seq: str, qstart: int, qend: int, one_based: bool) -> str:
     if not seq:
         return seq
@@ -1218,48 +1344,14 @@ def build_sample_assembly_from_contigs(
     if not contigs:
         raise ValueError(f"No contigs found in {contig_fa}")
 
-    tool = aligner
-    if tool == "auto":
-        tool = "minimap2" if shutil.which("minimap2") else "blastn"
-
-    tmp = out_dir / f"{sample_name}.align.tmp"
-    if tool == "minimap2":
-        if not shutil.which("minimap2"):
-            raise RuntimeError("minimap2 not found in PATH.")
-        with tmp.open("wt") as out:
-            subprocess.run(
-                ["minimap2", "-x", "asm5", str(seed_fa), str(contig_fa)],
-                stdout=out,
-                check=True,
-            )
-        hits = parse_minimap2_paf(tmp, min_identity=min_identity, min_len=min_len)
-    elif tool == "blastn":
-        if not shutil.which("blastn"):
-            raise RuntimeError("blastn not found in PATH.")
-        with tmp.open("wt") as out:
-            subprocess.run(
-                [
-                    "blastn",
-                    "-query",
-                    str(contig_fa),
-                    "-subject",
-                    str(seed_fa),
-                    "-outfmt",
-                    "6 qseqid sstart send length pident bitscore qstart qend",
-                ],
-                stdout=out,
-                check=True,
-            )
-        hits = parse_blast_tab(tmp, min_identity=min_identity, min_len=min_len)
-    else:
-        raise ValueError(f"Unsupported aligner: {aligner}")
-
-    try:
-        tmp.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-    chosen = choose_best_hits(hits)
+    chosen, tool = map_hits_for_candidate(
+        contig_fa=contig_fa,
+        seed_fa=seed_fa,
+        min_identity=min_identity,
+        min_len=min_len,
+        aligner=aligner,
+        tmp_prefix=out_dir / sample_name,
+    )
     # path_sequence fasta often contains multiple alternative graph paths.
     # Keep only the best-scoring path to avoid concatenating alternative assemblies.
     if "path_sequence" in contig_fa.name.lower() and len(chosen) > 1:
@@ -1415,6 +1507,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         gap_n,
     )
     cp_regions: Optional[Dict[str, Tuple[int, int]]] = None
+    expected_one_ir_len: Optional[int] = None
     if args.organelle_mode == "plant_pt" and args.pt_single_ir:
         cp_regions = resolve_cp_regions(
             seed_fa=seed,
@@ -1422,6 +1515,12 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             cp_regions_path=args.cp_regions,
             cpstools_bin=args.cpstools_bin,
             cpstools_args=list(args.cpstools_args),
+        )
+        ir_name = choose_ir_name(cp_regions, args.pt_keep_ir)
+        expected_one_ir_len = (
+            region_len(*cp_regions["LSC"], total_len=len(seed_seq))
+            + region_len(*cp_regions[ir_name], total_len=len(seed_seq))
+            + region_len(*cp_regions["SSC"], total_len=len(seed_seq))
         )
 
     sample_dirs = sorted([p for p in in_dir.iterdir() if p.is_dir()])
@@ -1432,19 +1531,31 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     all_multi = out_dir / "assembled_samples.fasta"
     with summary.open("wt") as sumf, all_multi.open("wt") as mf:
         sumf.write(
-            "sample\tstatus\tmode\tcontigs_fasta\tfastg\tselected_contigs\tassembled_len\tassembled_fasta\tmessage\n"
+            "sample\tstatus\tmode\tsource\tchosen_fasta\tcandidate_count\tfastg\tselected_contigs\tassembled_len\tassembled_fasta\tmessage\n"
         )
         for sdir in sample_dirs:
             sample = sdir.name
-            contig, fastg = pick_sample_contig_and_fastg(sdir)
-            if contig is None:
-                sumf.write(f"{sample}\tFAIL\t{args.organelle_mode}\t-\t{fastg or '-'}\t0\t0\t-\tcontigs not found\n")
+            candidates, fastg, source = discover_sample_candidates(sdir)
+            if not candidates:
+                sumf.write(
+                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t0\t{fastg or '-'}\t0\t0\t-\tno candidate fasta found\n"
+                )
                 continue
 
             sample_out = out_dir / sample
             try:
+                chosen_fa, cand_n = select_best_candidate_fasta(
+                    candidates=candidates,
+                    seed_fa=seed,
+                    sample_name=sample,
+                    sample_out=sample_out,
+                    min_identity=min_identity,
+                    min_len=min_len,
+                    aligner=args.aligner,
+                    expected_len=expected_one_ir_len,
+                )
                 out_fa, nsel, alen, note = build_sample_assembly_from_contigs(
-                    contig_fa=contig,
+                    contig_fa=chosen_fa,
                     seed_fa=seed,
                     sample_name=sample,
                     out_dir=sample_out,
@@ -1466,11 +1577,11 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 for sid, seq in seqs.items():
                     mf.write(f">{sid}\n{seq}\n")
                 sumf.write(
-                    f"{sample}\tOK\t{args.organelle_mode}\t{contig}\t{fastg or '-'}\t{nsel}\t{alen}\t{out_fa}\t{note}\n"
+                    f"{sample}\tOK\t{args.organelle_mode}\t{source}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{nsel}\t{alen}\t{out_fa}\t{note}\n"
                 )
             except Exception as exc:
                 sumf.write(
-                    f"{sample}\tFAIL\t{args.organelle_mode}\t{contig}\t{fastg or '-'}\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
+                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t{len(candidates)}\t{fastg or '-'}\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
                 )
 
     logger.info("sortOrgan completed. Summary: %s", summary)

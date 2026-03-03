@@ -115,6 +115,9 @@ Outputs:
 - `assembled_samples.fasta` (merged multifasta)
 - per-sample `*.organellar.fasta`
 
+For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
+When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.
+
 After `sortOrgan`, you can run PanGraph -> DIPPER -> TWILIGHT -> panmanUtils directly:
 
 ```bash
