@@ -1096,14 +1096,18 @@ def pick_sample_contig_and_fastg(sample_dir: Path) -> Tuple[Optional[Path], Opti
     return contig, fastg
 
 
-def parse_minimap2_paf(paf_path: Path, min_identity: float, min_len: int) -> List[Tuple[str, int, int, str, float, int]]:
-    hits: List[Tuple[str, int, int, str, float, int]] = []
+def parse_minimap2_paf(
+    paf_path: Path, min_identity: float, min_len: int
+) -> List[Tuple[str, int, int, str, float, int, int, int]]:
+    hits: List[Tuple[str, int, int, str, float, int, int, int]] = []
     with paf_path.open("rt") as fh:
         for raw in fh:
             parts = raw.rstrip("\n").split("\t")
             if len(parts) < 12:
                 continue
             qname = parts[0]
+            qstart = int(parts[2])
+            qend = int(parts[3])
             strand = parts[4]
             tstart = int(parts[7])
             tend = int(parts[8])
@@ -1114,12 +1118,14 @@ def parse_minimap2_paf(paf_path: Path, min_identity: float, min_len: int) -> Lis
             ident = nmatch / alen
             if ident < min_identity or alen < min_len:
                 continue
-            hits.append((qname, tstart, tend, strand, ident, alen))
+            hits.append((qname, tstart, tend, strand, ident, alen, qstart, qend))
     return hits
 
 
-def parse_blast_tab(tab_path: Path, min_identity: float, min_len: int) -> List[Tuple[str, int, int, str, float, int]]:
-    hits: List[Tuple[str, int, int, str, float, int]] = []
+def parse_blast_tab(
+    tab_path: Path, min_identity: float, min_len: int
+) -> List[Tuple[str, int, int, str, float, int, int, int]]:
+    hits: List[Tuple[str, int, int, str, float, int, int, int]] = []
     with tab_path.open("rt") as fh:
         for raw in fh:
             parts = raw.rstrip("\n").split("\t")
@@ -1130,15 +1136,19 @@ def parse_blast_tab(tab_path: Path, min_identity: float, min_len: int) -> List[T
             send = int(parts[2])
             alen = int(parts[3])
             pident = float(parts[4]) / 100.0
+            qstart = int(parts[6])
+            qend = int(parts[7])
             strand = "+" if sstart <= send else "-"
             if pident < min_identity or alen < min_len:
                 continue
-            hits.append((qname, min(sstart, send), max(sstart, send), strand, pident, alen))
+            hits.append((qname, min(sstart, send), max(sstart, send), strand, pident, alen, qstart, qend))
     return hits
 
 
-def choose_best_hits(hits: List[Tuple[str, int, int, str, float, int]]) -> List[Tuple[str, int, int, str, float, int]]:
-    best: Dict[str, Tuple[str, int, int, str, float, int]] = {}
+def choose_best_hits(
+    hits: List[Tuple[str, int, int, str, float, int, int, int]]
+) -> List[Tuple[str, int, int, str, float, int, int, int]]:
+    best: Dict[str, Tuple[str, int, int, str, float, int, int, int]] = {}
     for h in hits:
         qname = h[0]
         if qname not in best:
@@ -1150,6 +1160,21 @@ def choose_best_hits(hits: List[Tuple[str, int, int, str, float, int]]) -> List[
     selected = list(best.values())
     selected.sort(key=lambda x: (x[1], x[2]))
     return selected
+
+
+def slice_query_segment(seq: str, qstart: int, qend: int, one_based: bool) -> str:
+    if not seq:
+        return seq
+    n = len(seq)
+    if one_based:
+        s = max(1, min(qstart, qend)) - 1
+        e = min(n, max(qstart, qend))
+    else:
+        s = max(0, min(qstart, qend))
+        e = min(n, max(qstart, qend))
+    if e <= s:
+        return seq
+    return seq[s:e]
 
 
 def build_sample_assembly_from_contigs(
@@ -1235,7 +1260,7 @@ def build_sample_assembly_from_contigs(
         complete_seq: Optional[str] = None
         complete_note = ""
         if len(chosen) == 1:
-            cid, _sstart, _send, strand, _ident, _alen = chosen[0]
+            cid, _sstart, _send, strand, _ident, _alen, _qstart, _qend = chosen[0]
             cseq = contigs.get(cid, "")
             if strand == "-":
                 cseq = reverse_complement(cseq)
@@ -1263,9 +1288,9 @@ def build_sample_assembly_from_contigs(
 
         # Fragmented route
         region_order = ["LSC", ir_name, "SSC"]
-        region_hits: Dict[str, List[Tuple[str, int, int, str, float, int]]] = {r: [] for r in region_order}
+        region_hits: Dict[str, List[Tuple[str, int, int, str, float, int, int, int]]] = {r: [] for r in region_order}
         for h in chosen:
-            cid, sstart, send, strand, ident, alen = h
+            cid, sstart, send, strand, ident, alen, qstart, qend = h
             if alen < pt_fragment_min_len:
                 continue
             mid = (sstart + send) // 2
@@ -1288,10 +1313,12 @@ def build_sample_assembly_from_contigs(
                 rhs = sorted(region_hits[r], key=lambda x: (x[1], x[2]))
                 region_seq_parts: List[str] = []
                 covered = 0
-                for cid, sstart, send, strand, ident, alen in rhs:
+                for cid, sstart, send, strand, ident, alen, qstart, qend in rhs:
                     cseq = contigs.get(cid, "")
                     if not cseq:
                         continue
+                    # Keep only mapped query segment to reduce non-organelle flanking sequence.
+                    cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
                     if strand == "-":
                         cseq = reverse_complement(cseq)
                     region_seq_parts.append(cseq)
@@ -1317,10 +1344,14 @@ def build_sample_assembly_from_contigs(
     kept = 0
     with (out_dir / f"{sample_name}.selected_contigs.tsv").open("wt") as tab:
         tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\n")
-        for contig_id, sstart, send, strand, ident, alen in chosen:
+        for contig_id, sstart, send, strand, ident, alen, qstart, qend in chosen:
             if contig_id not in contigs:
                 continue
             cseq = contigs[contig_id]
+            if tool == "minimap2":
+                cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=False)
+            else:
+                cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
             if strand == "-":
                 cseq = reverse_complement(cseq)
             seq_parts.append(cseq)
