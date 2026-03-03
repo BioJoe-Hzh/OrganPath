@@ -95,7 +95,6 @@ OrganPath sortOrgan \
   -o sortorgan_out \
   -s seed_pt.fa \
   --organelle-mode plant_pt \
-  --pt-single-ir \
   --pt-keep-ir auto \
   --cpstools-bin cpstools \
   --min-identity 0.95 \
@@ -103,6 +102,7 @@ OrganPath sortOrgan \
 ```
 
 Notes:
+- In `--organelle-mode plant_pt`, OrganPath now enables single-IR logic by default and requires seed-based cp regions to be resolvable; if seed cannot be split into chloroplast regions, command fails.
 - If `--cpstools-args` is not provided, OrganPath now runs a built-in default workflow:
   `cpstools IR -> cpstools Seq -m LSC -> cpstools IR`
   and auto-generates `cp_regions.tsv`.
@@ -118,6 +118,8 @@ Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)
 - `assembled_samples.fasta` (merged multifasta)
 - per-sample `*.organellar.fasta`
+- for `plant_pt` single-IR: per-sample `sample.LSC.fasta`, `sample.IR.fasta`, `sample.SSC.fasta`
+- for `plant_pt` single-IR: merged `partitions/LSC_samples.fasta`, `partitions/IR_samples.fasta`, `partitions/SSC_samples.fasta`
 
 `--min-non-n-len` only controls whether a sample is included in `assembled_samples.fasta`.
 Per-sample fasta is still written, and summary marks filtered rows as `FILTERED` with `non_n_len`.
@@ -128,6 +130,17 @@ Step 3 (Panel): Align and trim multifasta:
 OrganPath align \
   -i sortorgan_out/assembled_samples.fasta \
   -o align_out \
+  --threads 24 \
+  --trim
+```
+
+For plant chloroplast partition-aware alignment (recommended when SSC inversion/isomer may affect whole-genome alignment):
+
+```bash
+OrganPath align \
+  -i sortorgan_out \
+  -o align_out \
+  --plant-pt-partition \
   --threads 24 \
   --trim
 ```

@@ -1168,6 +1168,11 @@ def extract_circular_region(seq: str, start: int, end: int) -> str:
 
 
 def reorder_cp_single_ir(seq: str, cp_regions: Dict[str, Tuple[int, int]], keep_ir: str) -> Tuple[str, str]:
+    parts, ir_name = reorder_cp_single_ir_parts(seq=seq, cp_regions=cp_regions, keep_ir=keep_ir)
+    return parts["LSC"] + parts["IR"] + parts["SSC"], ir_name
+
+
+def reorder_cp_single_ir_parts(seq: str, cp_regions: Dict[str, Tuple[int, int]], keep_ir: str) -> Tuple[Dict[str, str], str]:
     lsc = extract_circular_region(seq, *cp_regions["LSC"])
     ssc = extract_circular_region(seq, *cp_regions["SSC"])
     keep = keep_ir.lower()
@@ -1178,7 +1183,7 @@ def reorder_cp_single_ir(seq: str, cp_regions: Dict[str, Tuple[int, int]], keep_
     else:
         ir_name = "IRB" if "IRB" in cp_regions else ("IRA" if "IRA" in cp_regions else "IR")
     ir = extract_circular_region(seq, *cp_regions[ir_name])
-    return lsc + ir + ssc, ir_name
+    return {"LSC": lsc, "IR": ir, "SSC": ssc}, ir_name
 
 
 def region_len(start: int, end: int, total_len: int) -> int:
@@ -1572,7 +1577,7 @@ def build_sample_assembly_from_contigs(
     pt_fragment_min_len: int = 1000,
     pt_complete_min_frac: float = 0.85,
     seed_len: int = 0,
-) -> Tuple[str, int, int, str]:
+) -> Tuple[str, int, int, str, Optional[Dict[str, str]]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
     if not contigs:
@@ -1605,6 +1610,7 @@ def build_sample_assembly_from_contigs(
         expected_one_ir = expected_lsc + expected_ir + expected_ssc
 
         complete_seq: Optional[str] = None
+        complete_parts: Optional[Dict[str, str]] = None
         complete_note = ""
         if len(chosen) == 1:
             cid, _sstart, _send, strand, _ident, _alen, _qstart, _qend = chosen[0]
@@ -1616,7 +1622,8 @@ def build_sample_assembly_from_contigs(
                     samp_regions = cp_regions_from_sequence_with_cpstools(
                         cseq, sample_out=out_dir, sample_name=sample_name, cpstools_bin=cpstools_bin
                     )
-                    complete_seq, kept_ir = reorder_cp_single_ir(cseq, cp_regions=samp_regions, keep_ir=pt_keep_ir)
+                    complete_parts, kept_ir = reorder_cp_single_ir_parts(cseq, cp_regions=samp_regions, keep_ir=pt_keep_ir)
+                    complete_seq = complete_parts["LSC"] + complete_parts["IR"] + complete_parts["SSC"]
                     complete_note = f"type:complete;single_ir:{kept_ir}"
                 except Exception as exc:
                     complete_note = f"type:fragmented_fallback;cpstools_sample_fail:{str(exc).replace(chr(9), ' ')}"
@@ -1631,7 +1638,7 @@ def build_sample_assembly_from_contigs(
                 tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\tregion\n")
                 h = chosen[0]
                 tab.write(f"{h[0]}\t{h[1]}\t{h[2]}\t{h[3]}\t{h[4]:.4f}\t{h[5]}\tcomplete\n")
-            return str(out_fa), 1, len(complete_seq), note
+            return str(out_fa), 1, len(complete_seq), note, complete_parts
 
         # Fragmented route
         region_order = ["LSC", ir_name, "SSC"]
@@ -1652,6 +1659,7 @@ def build_sample_assembly_from_contigs(
 
         n_gap = "N" * gap_n
         final_parts: List[str] = []
+        part_dict: Dict[str, str] = {"LSC": "", "IR": "", "SSC": ""}
         missing_bp = 0
         kept = 0
         with (out_dir / f"{sample_name}.selected_contigs.tsv").open("wt") as tab:
@@ -1673,18 +1681,23 @@ def build_sample_assembly_from_contigs(
                     kept += 1
                     tab.write(f"{cid}\t{sstart}\t{send}\t{strand}\t{ident:.4f}\t{alen}\t{r}\n")
                 exp = region_len(*cp_regions[r], total_len=ref_total)
+                part_key = "IR" if r in {"IRB", "IRA", "IR"} else r
                 if region_seq_parts:
-                    final_parts.append(n_gap.join(region_seq_parts))
+                    region_concat = n_gap.join(region_seq_parts)
+                    final_parts.append(region_concat)
+                    part_dict[part_key] = region_concat
                     missing_bp += max(exp - covered, 0)
                 else:
-                    final_parts.append("N" * exp)
+                    region_gap = "N" * exp
+                    final_parts.append(region_gap)
+                    part_dict[part_key] = region_gap
                     missing_bp += exp
         merged = "".join(final_parts)
         note = f"type:fragmented;single_ir:{ir_name};missing_bp:{missing_bp};expected_len:{expected_one_ir}"
         out_fa = out_dir / f"{sample_name}.organellar.fasta"
         with out_fa.open("wt") as out:
             out.write(f">{sample_name}\n{merged}\n")
-        return str(out_fa), kept, len(merged), note
+        return str(out_fa), kept, len(merged), note, part_dict
 
     n_gap = "N" * gap_n
     seq_parts: List[str] = []
@@ -1716,7 +1729,7 @@ def build_sample_assembly_from_contigs(
     out_fa = out_dir / f"{sample_name}.organellar.fasta"
     with out_fa.open("wt") as out:
         out.write(f">{sample_name}\n{merged}\n")
-    return str(out_fa), kept, len(merged), note
+    return str(out_fa), kept, len(merged), note, None
 
 
 def cmd_sort_organ(args: argparse.Namespace) -> int:
@@ -1743,7 +1756,11 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
     )
     cp_regions: Optional[Dict[str, Tuple[int, int]]] = None
     expected_one_ir_len: Optional[int] = None
-    if args.organelle_mode == "plant_pt" and args.pt_single_ir:
+    if args.organelle_mode == "plant_pt" and args.pt_single_ir is None:
+        logger.info("plant_pt mode detected: enabling --pt-single-ir by default.")
+        args.pt_single_ir = True
+
+    if args.organelle_mode == "plant_pt":
         cp_regions = resolve_cp_regions(
             seed_fa=seed,
             out_dir=out_dir,
@@ -1751,6 +1768,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             cpstools_bin=args.cpstools_bin,
             cpstools_args=list(args.cpstools_args),
         )
+    if args.organelle_mode == "plant_pt" and args.pt_single_ir:
         ir_name = choose_ir_name(cp_regions, args.pt_keep_ir)
         expected_one_ir_len = (
             region_len(*cp_regions["LSC"], total_len=len(seed_seq))
@@ -1764,71 +1782,101 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
 
     summary = out_dir / "sortorgan_summary.tsv"
     all_multi = out_dir / "assembled_samples.fasta"
-    with summary.open("wt") as sumf, all_multi.open("wt") as mf:
-        sumf.write(
-            "sample\tstatus\tmode\tsource\tchosen_fasta\tcandidate_count\tfastg\tselected_contigs\tassembled_len\tnon_n_len\tassembled_fasta\tmessage\n"
-        )
-        for sdir in sample_dirs:
-            sample = sdir.name
-            candidates, fastg, source = discover_sample_candidates(sdir)
-            if not candidates:
-                sumf.write(
-                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t0\t{fastg or '-'}\t0\t0\t0\t-\tno candidate fasta found\n"
-                )
-                continue
+    part_files: Dict[str, Path] = {}
+    if args.organelle_mode == "plant_pt" and args.pt_single_ir:
+        pdir = out_dir / "partitions"
+        pdir.mkdir(parents=True, exist_ok=True)
+        part_files = {
+            "LSC": pdir / "LSC_samples.fasta",
+            "IR": pdir / "IR_samples.fasta",
+            "SSC": pdir / "SSC_samples.fasta",
+        }
 
-            sample_out = out_dir / sample
-            try:
-                chosen_fa, cand_n = select_best_candidate_fasta(
-                    candidates=candidates,
-                    seed_fa=seed,
-                    sample_name=sample,
-                    sample_out=sample_out,
-                    min_identity=min_identity,
-                    min_len=min_len,
-                    aligner=args.aligner,
-                    expected_len=expected_one_ir_len,
-                )
-                out_fa, nsel, alen, note = build_sample_assembly_from_contigs(
-                    contig_fa=chosen_fa,
-                    seed_fa=seed,
-                    sample_name=sample,
-                    out_dir=sample_out,
-                    min_identity=min_identity,
-                    min_len=min_len,
-                    gap_n=gap_n,
-                    aligner=args.aligner,
-                    organelle_mode=args.organelle_mode,
-                    seed_seq=seed_seq,
-                    pt_single_ir=args.pt_single_ir,
-                    cp_regions=cp_regions,
-                    pt_keep_ir=args.pt_keep_ir,
-                    cpstools_bin=args.cpstools_bin,
-                    pt_fragment_min_len=args.pt_fragment_min_len,
-                    pt_complete_min_frac=args.pt_complete_min_frac,
-                    seed_len=len(seed_seq),
-                )
-                seqs = read_fasta_sequences(Path(out_fa))
-                seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
-                if seq_non_n >= args.min_non_n_len:
-                    for sid, seq in seqs.items():
-                        mf.write(f">{sid}\n{seq}\n")
-                    status = "OK"
-                    note2 = note
-                else:
-                    status = "FILTERED"
-                    note2 = (
-                        f"{note};filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
-                        if note != "-"
-                        else f"filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+    with summary.open("wt") as sumf, all_multi.open("wt") as mf:
+        lsc_fh = part_files.get("LSC").open("wt") if "LSC" in part_files else None
+        ir_fh = part_files.get("IR").open("wt") if "IR" in part_files else None
+        ssc_fh = part_files.get("SSC").open("wt") if "SSC" in part_files else None
+        try:
+            part_handles = {"LSC": lsc_fh, "IR": ir_fh, "SSC": ssc_fh}
+            sumf.write(
+                "sample\tstatus\tmode\tsource\tchosen_fasta\tcandidate_count\tfastg\tselected_contigs\tassembled_len\tnon_n_len\tassembled_fasta\tmessage\n"
+            )
+            for sdir in sample_dirs:
+                sample = sdir.name
+                candidates, fastg, source = discover_sample_candidates(sdir)
+                if not candidates:
+                    sumf.write(
+                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t0\t{fastg or '-'}\t0\t0\t0\t-\tno candidate fasta found\n"
                     )
-                sumf.write(
-                    f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{nsel}\t{alen}\t{seq_non_n}\t{out_fa}\t{note2}\n"
-                )
-            except Exception as exc:
-                sumf.write(
-                    f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t{len(candidates)}\t{fastg or '-'}\t0\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
-                )
+                    continue
+
+                sample_out = out_dir / sample
+                try:
+                    chosen_fa, cand_n = select_best_candidate_fasta(
+                        candidates=candidates,
+                        seed_fa=seed,
+                        sample_name=sample,
+                        sample_out=sample_out,
+                        min_identity=min_identity,
+                        min_len=min_len,
+                        aligner=args.aligner,
+                        expected_len=expected_one_ir_len,
+                    )
+                    out_fa, nsel, alen, note, part_seqs = build_sample_assembly_from_contigs(
+                        contig_fa=chosen_fa,
+                        seed_fa=seed,
+                        sample_name=sample,
+                        out_dir=sample_out,
+                        min_identity=min_identity,
+                        min_len=min_len,
+                        gap_n=gap_n,
+                        aligner=args.aligner,
+                        organelle_mode=args.organelle_mode,
+                        seed_seq=seed_seq,
+                        pt_single_ir=args.pt_single_ir,
+                        cp_regions=cp_regions,
+                        pt_keep_ir=args.pt_keep_ir,
+                        cpstools_bin=args.cpstools_bin,
+                        pt_fragment_min_len=args.pt_fragment_min_len,
+                        pt_complete_min_frac=args.pt_complete_min_frac,
+                        seed_len=len(seed_seq),
+                    )
+                    seqs = read_fasta_sequences(Path(out_fa))
+                    seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
+                    if seq_non_n >= args.min_non_n_len:
+                        for sid, seq in seqs.items():
+                            mf.write(f">{sid}\n{seq}\n")
+                        if part_seqs:
+                            for pname in ("LSC", "IR", "SSC"):
+                                pseq = part_seqs.get(pname, "")
+                                if pseq:
+                                    with (sample_out / f"{sample}.{pname}.fasta").open("wt") as p_out:
+                                        p_out.write(f">{sample}\n{pseq}\n")
+                            for pname in ("LSC", "IR", "SSC"):
+                                fh = part_handles.get(pname)
+                                pseq = part_seqs.get(pname, "")
+                                if fh and pseq:
+                                    fh.write(f">{sample}\n{pseq}\n")
+                        status = "OK"
+                        note2 = note
+                    else:
+                        status = "FILTERED"
+                        note2 = (
+                            f"{note};filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+                            if note != "-"
+                            else f"filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+                        )
+                    sumf.write(
+                        f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{nsel}\t{alen}\t{seq_non_n}\t{out_fa}\t{note2}\n"
+                    )
+                except Exception as exc:
+                    sumf.write(
+                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t{len(candidates)}\t{fastg or '-'}\t0\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
+                    )
+        finally:
+            for fh in (lsc_fh, ir_fh, ssc_fh):
+                if fh:
+                    fh.close()
 
     logger.info("sortOrgan completed. Summary: %s", summary)
     logger.info("Merged multi-fasta: %s", all_multi)
@@ -2479,6 +2527,34 @@ def cmd_msa2vcf(args: argparse.Namespace) -> int:
     return 0
 
 
+def concatenate_three_partition_alignments(
+    lsc_aln: Path,
+    ir_aln: Path,
+    ssc_aln: Path,
+    out_fa: Path,
+) -> None:
+    lsc = read_fasta_sequences(lsc_aln)
+    ir = read_fasta_sequences(ir_aln)
+    ssc = read_fasta_sequences(ssc_aln)
+    if not lsc or not ir or not ssc:
+        raise ValueError("Partition alignments must be non-empty for LSC/IR/SSC.")
+    l_lens = {len(v) for v in lsc.values()}
+    i_lens = {len(v) for v in ir.values()}
+    s_lens = {len(v) for v in ssc.values()}
+    if len(l_lens) != 1 or len(i_lens) != 1 or len(s_lens) != 1:
+        raise ValueError("Inconsistent sequence lengths detected within partition alignments.")
+    l_len = next(iter(l_lens))
+    i_len = next(iter(i_lens))
+    s_len = next(iter(s_lens))
+    all_ids = sorted(set(lsc) | set(ir) | set(ssc))
+    with out_fa.open("wt") as out:
+        for sid in all_ids:
+            out.write(
+                f">{sid}\n"
+                f"{lsc.get(sid, 'N' * l_len)}{ir.get(sid, 'N' * i_len)}{ssc.get(sid, 'N' * s_len)}\n"
+            )
+
+
 def cmd_align(args: argparse.Namespace) -> int:
     in_fa = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
@@ -2488,12 +2564,52 @@ def cmd_align(args: argparse.Namespace) -> int:
 
     mafft_bin = ensure_tool(args.mafft_bin)
     aligned = out_dir / "aligned.fasta"
-    run_alignment_with_direction(
-        multifasta=in_fa,
-        aligned=aligned,
-        mafft_bin=mafft_bin,
-        adjust_direction=args.auto_reverse,
-    )
+    if args.plant_pt_partition:
+        if args.partition_dir:
+            pdir = Path(args.partition_dir).resolve()
+        elif in_fa.is_dir():
+            pdir = in_fa / "partitions"
+        else:
+            pdir = in_fa.parent / "partitions"
+        lsc_in = pdir / "LSC_samples.fasta"
+        ir_in = pdir / "IR_samples.fasta"
+        ssc_in = pdir / "SSC_samples.fasta"
+        for pf in (lsc_in, ir_in, ssc_in):
+            if not pf.exists():
+                raise FileNotFoundError(f"Partition fasta not found: {pf}")
+        lsc_aln = out_dir / "LSC.aligned.fasta"
+        ir_aln = out_dir / "IR.aligned.fasta"
+        ssc_aln = out_dir / "SSC.aligned.fasta"
+        run_alignment_with_direction(
+            multifasta=lsc_in,
+            aligned=lsc_aln,
+            mafft_bin=mafft_bin,
+            adjust_direction=args.auto_reverse,
+            threads=args.threads,
+        )
+        run_alignment_with_direction(
+            multifasta=ir_in,
+            aligned=ir_aln,
+            mafft_bin=mafft_bin,
+            adjust_direction=args.auto_reverse,
+            threads=args.threads,
+        )
+        run_alignment_with_direction(
+            multifasta=ssc_in,
+            aligned=ssc_aln,
+            mafft_bin=mafft_bin,
+            adjust_direction=args.auto_reverse,
+            threads=args.threads,
+        )
+        concatenate_three_partition_alignments(lsc_aln=lsc_aln, ir_aln=ir_aln, ssc_aln=ssc_aln, out_fa=aligned)
+    else:
+        run_alignment_with_direction(
+            multifasta=in_fa,
+            aligned=aligned,
+            mafft_bin=mafft_bin,
+            adjust_direction=args.auto_reverse,
+            threads=args.threads,
+        )
     if args.trim:
         trimal_bin = ensure_tool(args.trimal_bin)
         pre_trim = out_dir / "trimmed.pre.fasta"
@@ -2808,7 +2924,12 @@ def build_parser() -> argparse.ArgumentParser:
         "align",
         help="Panel: align multifasta with MAFFT and optional trimAl trimming",
     )
-    p_align.add_argument("-i", "--input", required=True, help="Input multifasta")
+    p_align.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input multifasta; with --plant-pt-partition, can be sortOrgan output directory",
+    )
     p_align.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_align.add_argument("--mafft-bin", default="mafft", help="MAFFT executable name/path")
     p_align.add_argument("--threads", default="AUTO", help="MAFFT threads (AUTO uses all cores)")
@@ -2835,6 +2956,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--snp-only",
         action="store_true",
         help="Post-trim site filter: keep SNP columns only",
+    )
+    p_align.add_argument(
+        "--plant-pt-partition",
+        action="store_true",
+        help="Use sortOrgan plant_pt partition FASTAs (LSC/IR/SSC) for separate alignment then concatenate",
+    )
+    p_align.add_argument(
+        "--partition-dir",
+        help="Partition directory containing LSC_samples.fasta, IR_samples.fasta, SSC_samples.fasta",
     )
     p_align.set_defaults(func=cmd_align)
 
@@ -2898,7 +3028,12 @@ def build_parser() -> argparse.ArgumentParser:
             "animal_mt(0.95,1000,100), generic(0.95,1000,100) for (identity,min_len,gap_n)"
         ),
     )
-    p_sort.add_argument("--pt-single-ir", action="store_true", help="Plant chloroplast mode: reorder as LSC+singleIR+SSC")
+    p_sort.add_argument(
+        "--pt-single-ir",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Plant chloroplast mode: reorder as LSC+singleIR+SSC (default: auto-on in plant_pt)",
+    )
     p_sort.add_argument(
         "--pt-keep-ir",
         default="auto",
@@ -3057,7 +3192,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection (default: 1000)")
     p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
     p_ch_pt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
-    p_ch_pt.add_argument("--pt-single-ir", action="store_true", help="Reorder chloroplast output to LSC+singleIR+SSC")
+    p_ch_pt.add_argument(
+        "--pt-single-ir",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Reorder chloroplast output to LSC+singleIR+SSC (default: on)",
+    )
     p_ch_pt.add_argument("--pt-keep-ir", default="auto", choices=["auto", "ira", "irb"], help="IR copy kept in single-IR mode")
     p_ch_pt.add_argument("--cp-regions", help="Region table from cpstools (LSC/SSC/IR coordinates)")
     p_ch_pt.add_argument("--cpstools-bin", default="cpstools", help="cpstools executable")
