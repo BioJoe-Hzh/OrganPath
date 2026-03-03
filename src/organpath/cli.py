@@ -481,9 +481,14 @@ def run_alignment_and_trimming(
 
 
 def run_alignment_with_direction(
-    multifasta: Path, aligned: Path, mafft_bin: str, adjust_direction: bool
+    multifasta: Path, aligned: Path, mafft_bin: str, adjust_direction: bool, threads: str = "AUTO"
 ) -> None:
     cmd = [mafft_bin, "--auto"]
+    t = str(threads).strip().upper()
+    if t == "AUTO":
+        cmd += ["--thread", "-1"]
+    else:
+        cmd += ["--thread", str(threads)]
     if adjust_direction:
         cmd.append("--adjustdirectionaccurately")
     cmd.append(str(multifasta))
@@ -1931,6 +1936,11 @@ def run_panman_pipeline(args: argparse.Namespace, input_fa: Path, out_dir: Path,
             )
         else:
             run_command([pangraph_bin] + _render_tokens(list(args.pangraph_args)))
+    elif args.run_panman and not pangraph_json.exists():
+        raise FileNotFoundError(
+            f"--run-panman requires PanGraph JSON, but not found: {pangraph_json}. "
+            "Use --run-pangraph or provide --pangraph-json."
+        )
 
     if args.run_dipper:
         dipper_bin = shutil.which(args.dipper_bin)
@@ -1946,6 +1956,11 @@ def run_panman_pipeline(args: argparse.Namespace, input_fa: Path, out_dir: Path,
             run_command([dipper_bin, "-i", "m", "-I", str(input_fa), "-O", str(aln_fa), "-m", "1", "-d", "4"])
         else:
             run_command([dipper_bin] + _render_tokens(list(args.dipper_args)))
+    elif args.run_twilight and not Path(aln_fa).exists():
+        raise FileNotFoundError(
+            f"--run-twilight requires an alignment file, but not found: {aln_fa}. "
+            "Use --run-dipper or provide --aln-file."
+        )
 
     if args.run_twilight:
         twilight_bin = shutil.which(args.twilight_bin)
@@ -1961,6 +1976,11 @@ def run_panman_pipeline(args: argparse.Namespace, input_fa: Path, out_dir: Path,
             run_command([twilight_bin, "-I", str(aln_fa), "-O", str(guide_tree)])
         else:
             run_command([twilight_bin] + _render_tokens(list(args.twilight_args)))
+    elif args.run_panman and not Path(guide_tree).exists():
+        raise FileNotFoundError(
+            f"--run-panman requires guide tree, but not found: {guide_tree}. "
+            "Use --run-twilight or provide --guide-tree."
+        )
 
     blocks_dir = Path(args.blocks_dir).resolve() if args.blocks_dir else (out_dir / "panman_blocks")
     if args.run_panman:
@@ -2250,6 +2270,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             aligned=aligned,
             mafft_bin=mafft_bin,
             adjust_direction=args.auto_reverse,
+            threads=args.align_threads,
         )
         pre_trim = out_dir / "trimmed.pre.fasta"
         run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
@@ -2333,6 +2354,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         aligned=aligned,
         mafft_bin=mafft_bin,
         adjust_direction=args.auto_reverse,
+        threads=args.align_threads,
     )
     pre_trim = out_dir / "trimmed.pre.fasta"
     run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
@@ -2381,6 +2403,7 @@ def cmd_msa2vcf(args: argparse.Namespace) -> int:
         aligned=aligned,
         mafft_bin=mafft_bin,
         adjust_direction=args.auto_reverse,
+        threads=args.threads,
     )
 
     msa_for_vcf = aligned
@@ -2685,6 +2708,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Thread number for per-sample genotype/consensus processing",
     )
     p_run.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
+    p_run.add_argument(
+        "--align-threads",
+        default="AUTO",
+        help="MAFFT threads used for alignment in run mode (AUTO uses all cores)",
+    )
     p_run.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_run.add_argument(
         "--auto-reverse",
@@ -2783,6 +2811,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_align.add_argument("-i", "--input", required=True, help="Input multifasta")
     p_align.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_align.add_argument("--mafft-bin", default="mafft", help="MAFFT executable name/path")
+    p_align.add_argument("--threads", default="AUTO", help="MAFFT threads (AUTO uses all cores)")
     p_align.add_argument(
         "--auto-reverse",
         action=argparse.BooleanOptionalAction,
@@ -2937,7 +2966,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments passed to panmanUtils. Supports placeholders: {pangraph_json} {guide_tree} {panman_out} {panman_file}",
     )
     p_pan.add_argument("--aln-file", help="Alignment path for DIPPER/TWILIGHT handoff (optional)")
-    p_pan.add_argument("--guide-tree", help="Guide tree path for TWILIGHT/PanMAN handoff (optional)")
+    p_pan.add_argument(
+        "--guide-tree",
+        help="Guide tree path for PanMAN handoff (optional). Useful with --no-run-twilight.",
+    )
     p_pan.add_argument("--dipper-graph", help="DIPPER graph path (optional)")
     p_pan.add_argument("--blocks-dir", help="Directory intended for block outputs if panman args produce them")
     p_pan.set_defaults(func=cmd_panman)

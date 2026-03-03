@@ -128,6 +128,7 @@ Step 3 (Panel): Align and trim multifasta:
 OrganPath align \
   -i sortorgan_out/assembled_samples.fasta \
   -o align_out \
+  --threads 24 \
   --auto-reverse \
   --trim
 ```
@@ -158,6 +159,10 @@ OrganPath panman \
   --run-twilight \
   --run-panman
 ```
+
+`OrganPath panman` supports two routes:
+- Full route: `pangraph -> dipper -> twilight -> panmanUtils`
+- User-tree route: provide `--guide-tree your_tree.nwk` and skip TWILIGHT (`--no-run-twilight`)
 
 Three organelle channels:
 
