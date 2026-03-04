@@ -2448,6 +2448,46 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not (has_vcf and has_ref):
         raise ValueError("For VCF mode, both --vcf and --ref are required.")
 
+    run_vcf_to_msa(args, out_dir=out_dir)
+    multifasta = out_dir / "all_samples.fasta"
+
+    run_alignment_with_direction(
+        multifasta=multifasta,
+        aligned=aligned,
+        mafft_bin=mafft_bin,
+        adjust_direction=args.auto_reverse,
+        threads=args.align_threads,
+    )
+    pre_trim = out_dir / "trimmed.pre.fasta"
+    run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
+    if args.max_missing_frac < 1.0 or args.snp_only:
+        kept, total = filter_alignment_sites(
+            in_fa=pre_trim,
+            out_fa=trimmed,
+            max_missing_frac=args.max_missing_frac,
+            snp_only=args.snp_only,
+        )
+        logger.info("Post-trim site filter kept %d/%d columns (missing<=%.3f, snp_only=%s).", kept, total, args.max_missing_frac, args.snp_only)
+    else:
+        shutil.move(str(pre_trim), str(trimmed))
+    logger.info("Alignment and trimming completed.")
+
+    if args.run_phyview:
+        run_phyview(
+            trimmed_fasta=trimmed,
+            out_dir=out_dir / "phyview",
+            ufboot=args.ufboot,
+            threads=args.threads,
+            model=args.model,
+            safe=not args.unsafe,
+        )
+        logger.info("PhyView ML tree inference completed.")
+
+    logger.info("All outputs are in: %s", out_dir)
+    return 0
+
+
+def run_vcf_to_msa(args: argparse.Namespace, out_dir: Path) -> Path:
     vcf_path = Path(args.vcf).resolve()
     ref_fasta = Path(args.ref).resolve()
 
@@ -2495,39 +2535,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         sample_threads=max(1, args.sample_threads),
     )
     logger.info("Generated filtered VCF and consensus FASTA files.")
+    return multifasta
 
-    run_alignment_with_direction(
-        multifasta=multifasta,
-        aligned=aligned,
-        mafft_bin=mafft_bin,
-        adjust_direction=args.auto_reverse,
-        threads=args.align_threads,
-    )
-    pre_trim = out_dir / "trimmed.pre.fasta"
-    run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
-    if args.max_missing_frac < 1.0 or args.snp_only:
-        kept, total = filter_alignment_sites(
-            in_fa=pre_trim,
-            out_fa=trimmed,
-            max_missing_frac=args.max_missing_frac,
-            snp_only=args.snp_only,
-        )
-        logger.info("Post-trim site filter kept %d/%d columns (missing<=%.3f, snp_only=%s).", kept, total, args.max_missing_frac, args.snp_only)
-    else:
-        shutil.move(str(pre_trim), str(trimmed))
-    logger.info("Alignment and trimming completed.")
 
-    if args.run_phyview:
-        run_phyview(
-            trimmed_fasta=trimmed,
-            out_dir=out_dir / "phyview",
-            ufboot=args.ufboot,
-            threads=args.threads,
-            model=args.model,
-            safe=not args.unsafe,
-        )
-        logger.info("PhyView ML tree inference completed.")
-
+def cmd_vcf2msa(args: argparse.Namespace) -> int:
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    multifasta = run_vcf_to_msa(args, out_dir=out_dir)
+    logger.info("VCF2MSA completed. Merged multifasta: %s", multifasta)
     logger.info("All outputs are in: %s", out_dir)
     return 0
 
@@ -3111,6 +3126,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable IQ-TREE safe likelihood kernel (default uses -safe)",
     )
     p_run.set_defaults(func=cmd_run)
+
+    p_vcf2msa = subs.add_parser(
+        "VCF2MSA",
+        help="Build per-sample consensus FASTAs and merged multifasta from VCF+REF (no alignment/trimming)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_vcf2msa.add_argument("-v", "--vcf", required=True, help="Input VCF or VCF.GZ")
+    p_vcf2msa.add_argument("-r", "--ref", required=True, help="Reference fasta")
+    p_vcf2msa.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_vcf2msa.add_argument(
+        "--id-map",
+        help="Two-column file. oldID newID => rename; oldID POP (repeated POP labels) => rename to POP_oldID",
+    )
+    p_vcf2msa.add_argument(
+        "--min-coverage",
+        type=float,
+        default=DEFAULT_MIN_COVERAGE,
+        help="Min sample coverage",
+    )
+    p_vcf2msa.add_argument(
+        "--min-mean-depth",
+        type=float,
+        default=DEFAULT_MIN_MEAN_DEPTH,
+        help="Drop sample only when coverage < threshold AND mean depth <= this value",
+    )
+    p_vcf2msa.add_argument(
+        "--min-dp",
+        type=int,
+        default=DEFAULT_MIN_DP,
+        help="Mark genotype missing if DP < this",
+    )
+    p_vcf2msa.add_argument(
+        "--min-gq",
+        type=float,
+        default=DEFAULT_MIN_GQ,
+        help="Mark genotype missing if GQ < this",
+    )
+    p_vcf2msa.add_argument("--keep-het", action="store_true", help="Keep heterozygous genotype (default: mask)")
+    p_vcf2msa.add_argument(
+        "--sample-threads",
+        type=int,
+        default=1,
+        help="Thread number for per-sample genotype/consensus processing",
+    )
+    p_vcf2msa.set_defaults(func=cmd_vcf2msa)
 
     p_phy = subs.add_parser("PhyView", help="Run one selected phylogenetic/relationship task on trimmed multifasta")
     p_phy.add_argument("-i", "--input", required=True, help="Input trimmed multifasta (FASTA)")
