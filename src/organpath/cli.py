@@ -3055,6 +3055,21 @@ def cmd_phyview(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_nex2nwk(args: argparse.Namespace) -> int:
+    nexus_in = Path(args.input).resolve()
+    newick_out = Path(args.output).resolve()
+    if not nexus_in.exists():
+        raise FileNotFoundError(f"Input NEXUS not found: {nexus_in}")
+    newick_out.parent.mkdir(parents=True, exist_ok=True)
+    nexus_tree_to_newick(
+        nexus_path=nexus_in,
+        out_newick=newick_out,
+        include_posterior=args.include_posterior,
+    )
+    logger.info("nex2nwk completed: %s", newick_out)
+    return 0
+
+
 def cmd_rename_tree(args: argparse.Namespace) -> int:
     tree_in = Path(args.input).resolve()
     tree_out = Path(args.output).resolve()
@@ -3320,6 +3335,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_phy.add_argument("--beast-heights", default="median", help="treeannotator node heights mode")
     p_phy.add_argument("--include-posterior", action="store_true", help="Keep posterior as internal labels in BEAST Newick output")
     p_phy.set_defaults(func=cmd_phyview)
+
+    p_nex2nwk = subs.add_parser(
+        "nex2nwk",
+        help="Convert BEAST/NEXUS tree file to plain Newick",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_nex2nwk.add_argument("-i", "--input", required=True, help="Input NEXUS tree file (.nex/.trees)")
+    p_nex2nwk.add_argument("-o", "--output", required=True, help="Output Newick file (.nwk)")
+    p_nex2nwk.add_argument(
+        "--include-posterior",
+        action="store_true",
+        help="Keep posterior values as internal labels instead of removing all BEAST annotations",
+    )
+    p_nex2nwk.set_defaults(func=cmd_nex2nwk)
 
     p_m2v = subs.add_parser(
         "MSA2VCF",
