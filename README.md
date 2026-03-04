@@ -169,6 +169,23 @@ OrganPath PhyView \
   --model MFP
 ```
 
+Prepare Pathphynder panel files from VCF + tree:
+
+```bash
+OrganPath Pathphynder \
+  --prepare \
+  -v input.vcf.gz \
+  -r ref.fa \
+  -t tree.nwk \
+  -o pathphynder_prepare_out \
+  --prefix panel_name
+```
+
+This runs:
+- `phynder -B` to create `panel_name.snp`
+- `pathPhynder -s prepare` to build prepare files
+- writes `pathphynder_prepare_manifest.tsv` for downstream usage
+
 For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
 When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.
 

@@ -2547,6 +2547,73 @@ def cmd_vcf2msa(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_pathphynder_bin(preferred: str) -> str:
+    p = shutil.which(preferred)
+    if p:
+        return p
+    alt = "pathphynder" if preferred == "pathPhynder" else "pathPhynder"
+    q = shutil.which(alt)
+    if q:
+        return q
+    raise RuntimeError(
+        f"Required tool not found in PATH: {preferred} (or {alt}). Please install pathPhynder."
+    )
+
+
+def cmd_pathphynder(args: argparse.Namespace) -> int:
+    if not args.prepare:
+        raise ValueError("Currently only --prepare mode is implemented for OrganPath Pathphynder.")
+
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vcf = Path(args.vcf).resolve()
+    tree = Path(args.tree).resolve()
+    ref = Path(args.ref).resolve()
+    if not vcf.exists():
+        raise FileNotFoundError(f"VCF not found: {vcf}")
+    if not tree.exists():
+        raise FileNotFoundError(f"Tree not found: {tree}")
+    if not ref.exists():
+        raise FileNotFoundError(f"Reference not found: {ref}")
+
+    prefix = args.prefix or tree.stem
+    snp_prefix = out_dir / f"{prefix}.snp"
+    prepare_prefix = out_dir / prefix
+
+    phynder_bin = ensure_tool(args.phynder_bin)
+    pathphynder_bin = resolve_pathphynder_bin(args.pathphynder_bin)
+
+    try:
+        _hdr, vcf_samples = read_header_and_samples(vcf)
+        tips = set(extract_tree_tip_names(tree.read_text()))
+        overlap = len(set(vcf_samples) & tips)
+        logger.info(
+            "Pathphynder prepare check: VCF samples=%d, tree tips=%d, overlap=%d",
+            len(vcf_samples),
+            len(tips),
+            overlap,
+        )
+    except Exception as exc:
+        logger.warning("Could not compute VCF/tree overlap before prepare: %s", exc)
+
+    run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(vcf)])
+    run_command([pathphynder_bin, "-s", "prepare", "-i", str(tree), "-p", str(prepare_prefix), "-f", str(snp_prefix)])
+
+    manifest = out_dir / "pathphynder_prepare_manifest.tsv"
+    with manifest.open("wt") as out:
+        out.write("key\tvalue\n")
+        out.write(f"tree\t{tree}\n")
+        out.write(f"vcf\t{vcf}\n")
+        out.write(f"ref\t{ref}\n")
+        out.write(f"snp_prefix\t{snp_prefix}\n")
+        out.write(f"prepare_prefix\t{prepare_prefix}\n")
+        out.write(f"phynder_bin\t{phynder_bin}\n")
+        out.write(f"pathphynder_bin\t{pathphynder_bin}\n")
+
+    logger.info("Pathphynder prepare completed. Manifest: %s", manifest)
+    return 0
+
+
 def cmd_msa2vcf(args: argparse.Namespace) -> int:
     in_fa = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
@@ -3171,6 +3238,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Thread number for per-sample genotype/consensus processing",
     )
     p_vcf2msa.set_defaults(func=cmd_vcf2msa)
+
+    p_pp = subs.add_parser(
+        "Pathphynder",
+        help="Prepare Pathphynder panel files from VCF+tree",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_pp.add_argument("--prepare", action="store_true", help="Run prepare mode (phynder -B + pathPhynder -s prepare)")
+    p_pp.add_argument("-v", "--vcf", required=True, help="Input VCF/VCF.GZ for panel variants")
+    p_pp.add_argument("-r", "--ref", required=True, help="Reference fasta (recorded for downstream pathPhynder all mode)")
+    p_pp.add_argument("-t", "--tree", required=True, help="Input Newick tree")
+    p_pp.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_pp.add_argument("--prefix", help="Output prefix (default: tree filename stem)")
+    p_pp.add_argument("--phynder-bin", default="phynder", help="phynder executable name/path")
+    p_pp.add_argument("--pathphynder-bin", default="pathPhynder", help="pathPhynder executable name/path")
+    p_pp.set_defaults(func=cmd_pathphynder)
 
     p_phy = subs.add_parser("PhyView", help="Run one selected phylogenetic/relationship task on trimmed multifasta")
     p_phy.add_argument("-i", "--input", required=True, help="Input trimmed multifasta (FASTA)")
