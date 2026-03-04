@@ -2577,9 +2577,11 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Reference not found: {ref}")
 
     prefix = args.prefix or tree.stem
+    norm_vcf = out_dir / f"{prefix}.atomized.norm.vcf"
     snp_prefix = out_dir / f"{prefix}.snp"
     prepare_prefix = out_dir / prefix
 
+    bcftools_bin = ensure_tool(args.bcftools_bin)
     phynder_bin = ensure_tool(args.phynder_bin)
     pathphynder_bin = resolve_pathphynder_bin(args.pathphynder_bin)
 
@@ -2596,7 +2598,23 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     except Exception as exc:
         logger.warning("Could not compute VCF/tree overlap before prepare: %s", exc)
 
-    run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(vcf)])
+    # Keep positional system intact: atomize/split variants without filtering.
+    run_command(
+        [
+            bcftools_bin,
+            "norm",
+            "-m",
+            "-any",
+            "-a",
+            "-f",
+            str(ref),
+            str(vcf),
+            "-Ov",
+            "-o",
+            str(norm_vcf),
+        ]
+    )
+    run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(norm_vcf)])
     run_command([pathphynder_bin, "-s", "prepare", "-i", str(tree), "-p", str(prepare_prefix), "-f", str(snp_prefix)])
 
     manifest = out_dir / "pathphynder_prepare_manifest.tsv"
@@ -2604,9 +2622,11 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         out.write("key\tvalue\n")
         out.write(f"tree\t{tree}\n")
         out.write(f"vcf\t{vcf}\n")
+        out.write(f"normalized_vcf\t{norm_vcf}\n")
         out.write(f"ref\t{ref}\n")
         out.write(f"snp_prefix\t{snp_prefix}\n")
         out.write(f"prepare_prefix\t{prepare_prefix}\n")
+        out.write(f"bcftools_bin\t{bcftools_bin}\n")
         out.write(f"phynder_bin\t{phynder_bin}\n")
         out.write(f"pathphynder_bin\t{pathphynder_bin}\n")
 
@@ -3250,6 +3270,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("-t", "--tree", required=True, help="Input Newick tree")
     p_pp.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_pp.add_argument("--prefix", help="Output prefix (default: tree filename stem)")
+    p_pp.add_argument("--bcftools-bin", default="bcftools", help="bcftools executable name/path")
     p_pp.add_argument("--phynder-bin", default="phynder", help="phynder executable name/path")
     p_pp.add_argument("--pathphynder-bin", default="pathPhynder", help="pathPhynder executable name/path")
     p_pp.set_defaults(func=cmd_pathphynder)

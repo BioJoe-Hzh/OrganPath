@@ -182,7 +182,8 @@ OrganPath Pathphynder \
 ```
 
 This runs:
-- `phynder -B` to create `panel_name.snp`
+- `bcftools norm -m -any -a -f` to atomize/split multi-allelic/complex variants (no filtering)
+- `phynder -B` on normalized VCF to create `panel_name.snp`
 - `pathPhynder -s prepare` to build prepare files
 - writes `pathphynder_prepare_manifest.tsv` for downstream usage
 
