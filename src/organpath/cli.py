@@ -493,6 +493,20 @@ def run_alignment_with_direction(
         cmd.append("--adjustdirection")
     cmd.append(str(multifasta))
     run_command(cmd, stdout_path=aligned)
+    if adjust_direction:
+        seqs = read_fasta_sequences(aligned)
+        normalized: Dict[str, str] = {}
+        for sid, seq in seqs.items():
+            nid = sid[3:] if sid.startswith("_R_") else sid
+            if nid in normalized:
+                # Keep the longer informative sequence if collision happens.
+                old_non_n = non_n_length(normalized[nid])
+                new_non_n = non_n_length(seq)
+                if new_non_n > old_non_n:
+                    normalized[nid] = seq
+            else:
+                normalized[nid] = seq
+        write_fasta_sequences(aligned, normalized)
 
 
 def write_ref_from_msa(msa_fa: Path, out_ref: Path, ref_id: Optional[str]) -> str:
@@ -1214,42 +1228,62 @@ def choose_ir_name(cp_regions: Dict[str, Tuple[int, int]], keep_ir: str) -> str:
     return "IR"
 
 
-def _count_kmer_matches(seq: str, ref_kmers: set, k: int) -> int:
-    if len(seq) < k:
-        return 0
-    c = 0
-    for i in range(len(seq) - k + 1):
-        kmer = seq[i : i + k]
-        if "N" in kmer:
-            continue
-        if kmer in ref_kmers:
-            c += 1
-    return c
-
-
-def orient_partition_to_seed(seq: str, seed_ref: str, k: int = 31) -> Tuple[str, str]:
+def orient_partition_to_seed(seq: str, seed_ref: str, work_dir: Path, tag: str) -> Tuple[str, str]:
     seq_u = seq.upper()
     ref_u = seed_ref.upper()
     if not seq_u or not ref_u:
         return seq_u, "NA"
-    # Skip orientation for near-empty/gap-only sequences.
     non_n = sum(1 for c in seq_u if c in {"A", "C", "G", "T"})
-    if non_n < max(200, k * 3):
+    if non_n < 200:
         return seq_u, "LOW_INFO"
-
-    ref_kmers = set()
-    if len(ref_u) >= k:
-        for i in range(len(ref_u) - k + 1):
-            km = ref_u[i : i + k]
-            if "N" not in km:
-                ref_kmers.add(km)
-    if not ref_kmers:
+    if not shutil.which("blastn"):
         return seq_u, "LOW_INFO"
-
-    fwd = _count_kmer_matches(seq_u, ref_kmers, k)
     rc_seq = reverse_complement(seq_u)
-    rev = _count_kmer_matches(rc_seq, ref_kmers, k)
-    if rev > fwd:
+    tmp_q = work_dir / f"{tag}.orient.query.fa"
+    tmp_s = work_dir / f"{tag}.orient.seed.fa"
+    tmp_t = work_dir / f"{tag}.orient.blast.tsv"
+    with tmp_q.open("wt") as out:
+        out.write(">FWD\n")
+        out.write(seq_u + "\n")
+        out.write(">RC\n")
+        out.write(rc_seq + "\n")
+    with tmp_s.open("wt") as out:
+        out.write(">SEED\n")
+        out.write(ref_u + "\n")
+    with tmp_t.open("wt") as out:
+        subprocess.run(
+            [
+                "blastn",
+                "-query",
+                str(tmp_q),
+                "-subject",
+                str(tmp_s),
+                "-max_hsps",
+                "1",
+                "-max_target_seqs",
+                "1",
+                "-outfmt",
+                "6 qseqid bitscore length pident sstrand",
+            ],
+            stdout=out,
+            check=True,
+        )
+    best = {"FWD": 0.0, "RC": 0.0}
+    for line in tmp_t.read_text().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        qid = parts[0]
+        bits = float(parts[1])
+        if qid in best and bits > best[qid]:
+            best[qid] = bits
+    try:
+        tmp_q.unlink(missing_ok=True)
+        tmp_s.unlink(missing_ok=True)
+        tmp_t.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if best["RC"] > best["FWD"]:
         return rc_seq, "RC"
     return seq_u, "FWD"
 
@@ -1478,7 +1512,7 @@ def map_hits_for_candidate(
 ) -> Tuple[List[Tuple[str, int, int, str, float, int, int, int]], str]:
     tool = aligner
     if tool == "auto":
-        tool = "minimap2" if shutil.which("minimap2") else "blastn"
+        tool = "blastn" if shutil.which("blastn") else "minimap2"
 
     tmp = tmp_prefix.with_suffix(".align.tmp")
     if tool == "minimap2":
@@ -1666,7 +1700,9 @@ def build_sample_assembly_from_contigs(
                     if seed_parts:
                         for pname in ("LSC", "SSC"):
                             if pname in complete_parts and pname in seed_parts:
-                                oseq, odir = orient_partition_to_seed(complete_parts[pname], seed_parts[pname])
+                                oseq, odir = orient_partition_to_seed(
+                                    complete_parts[pname], seed_parts[pname], work_dir=out_dir, tag=f"{sample_name}.{pname}.complete"
+                                )
                                 complete_parts[pname] = oseq
                                 orient_notes.append(f"{pname}:{odir}")
                     complete_seq = complete_parts["LSC"] + complete_parts["IR"] + complete_parts["SSC"]
@@ -1744,7 +1780,9 @@ def build_sample_assembly_from_contigs(
         if seed_parts:
             for pname in ("LSC", "SSC"):
                 if pname in part_dict and pname in seed_parts:
-                    oseq, odir = orient_partition_to_seed(part_dict[pname], seed_parts[pname])
+                    oseq, odir = orient_partition_to_seed(
+                        part_dict[pname], seed_parts[pname], work_dir=out_dir, tag=f"{sample_name}.{pname}.fragmented"
+                    )
                     part_dict[pname] = oseq
                     orient_notes.append(f"{pname}:{odir}")
         final_parts = [part_dict["LSC"], part_dict["IR"], part_dict["SSC"]]
@@ -3152,8 +3190,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_align.add_argument(
         "--auto-reverse",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use MAFFT --adjustdirection to auto-handle reverse-complement sequences (default: off)",
+        default=True,
+        help="Use MAFFT --adjustdirection to auto-handle reverse-complement sequences (default: on)",
     )
     p_align.add_argument(
         "--trim",

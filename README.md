@@ -115,6 +115,7 @@ Notes:
   (`type:complete` or `type:fragmented`, plus `missing_bp` and `expected_len`).
 - In `plant_pt` mode, `message` also includes `part_orient:LSC:...,SSC:...` to show
   per-partition orientation normalization against seed.
+  Orientation is now scored by `blastn` (FWD vs RC) per partition.
 
 Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)
@@ -154,6 +155,7 @@ In partition mode, OrganPath now does:
 - concatenate partitions to final `aligned.fasta` and `trimmed.fasta`
 - write `partition_sample_stats.tsv` with per-sample/per-partition missing rate and non-missing length
 - write `partition_sample_filter.tsv` with KEEP/DROP decision before trim
+- if MAFFT adds `_R_` prefixes during auto-reverse, OrganPath normalizes sample IDs back before filtering/concatenation
 
 Step 4 (Panel): ML tree from trimmed alignment:
 
