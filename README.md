@@ -113,6 +113,8 @@ Notes:
   - fragmented: assign contigs to `LSC/IR/SSC`, stitch in order with `N` gaps
 - `sortorgan_summary.tsv` records per-sample type and missing estimate in `message`
   (`type:complete` or `type:fragmented`, plus `missing_bp` and `expected_len`).
+- In `plant_pt` mode, `message` also includes `part_orient:LSC:...,SSC:...` to show
+  per-partition orientation normalization against seed.
 
 Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)

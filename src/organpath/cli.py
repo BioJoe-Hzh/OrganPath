@@ -1214,6 +1214,46 @@ def choose_ir_name(cp_regions: Dict[str, Tuple[int, int]], keep_ir: str) -> str:
     return "IR"
 
 
+def _count_kmer_matches(seq: str, ref_kmers: set, k: int) -> int:
+    if len(seq) < k:
+        return 0
+    c = 0
+    for i in range(len(seq) - k + 1):
+        kmer = seq[i : i + k]
+        if "N" in kmer:
+            continue
+        if kmer in ref_kmers:
+            c += 1
+    return c
+
+
+def orient_partition_to_seed(seq: str, seed_ref: str, k: int = 31) -> Tuple[str, str]:
+    seq_u = seq.upper()
+    ref_u = seed_ref.upper()
+    if not seq_u or not ref_u:
+        return seq_u, "NA"
+    # Skip orientation for near-empty/gap-only sequences.
+    non_n = sum(1 for c in seq_u if c in {"A", "C", "G", "T"})
+    if non_n < max(200, k * 3):
+        return seq_u, "LOW_INFO"
+
+    ref_kmers = set()
+    if len(ref_u) >= k:
+        for i in range(len(ref_u) - k + 1):
+            km = ref_u[i : i + k]
+            if "N" not in km:
+                ref_kmers.add(km)
+    if not ref_kmers:
+        return seq_u, "LOW_INFO"
+
+    fwd = _count_kmer_matches(seq_u, ref_kmers, k)
+    rc_seq = reverse_complement(seq_u)
+    rev = _count_kmer_matches(rc_seq, ref_kmers, k)
+    if rev > fwd:
+        return rc_seq, "RC"
+    return seq_u, "FWD"
+
+
 def cp_regions_from_sequence_with_cpstools(seq: str, sample_out: Path, sample_name: str, cpstools_bin: str) -> Dict[str, Tuple[int, int]]:
     cpstools = shutil.which(cpstools_bin)
     if not cpstools:
@@ -1577,6 +1617,7 @@ def build_sample_assembly_from_contigs(
     pt_fragment_min_len: int = 1000,
     pt_complete_min_frac: float = 0.85,
     seed_len: int = 0,
+    seed_parts: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, int, int, str, Optional[Dict[str, str]]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
@@ -1615,16 +1656,23 @@ def build_sample_assembly_from_contigs(
         if len(chosen) == 1:
             cid, _sstart, _send, strand, _ident, _alen, _qstart, _qend = chosen[0]
             cseq = contigs.get(cid, "")
-            if strand == "-":
-                cseq = reverse_complement(cseq)
             if len(cseq) >= int(expected_one_ir * pt_complete_min_frac):
                 try:
                     samp_regions = cp_regions_from_sequence_with_cpstools(
                         cseq, sample_out=out_dir, sample_name=sample_name, cpstools_bin=cpstools_bin
                     )
                     complete_parts, kept_ir = reorder_cp_single_ir_parts(cseq, cp_regions=samp_regions, keep_ir=pt_keep_ir)
+                    orient_notes: List[str] = []
+                    if seed_parts:
+                        for pname in ("LSC", "SSC"):
+                            if pname in complete_parts and pname in seed_parts:
+                                oseq, odir = orient_partition_to_seed(complete_parts[pname], seed_parts[pname])
+                                complete_parts[pname] = oseq
+                                orient_notes.append(f"{pname}:{odir}")
                     complete_seq = complete_parts["LSC"] + complete_parts["IR"] + complete_parts["SSC"]
                     complete_note = f"type:complete;single_ir:{kept_ir}"
+                    if orient_notes:
+                        complete_note += ";part_orient:" + ",".join(orient_notes)
                 except Exception as exc:
                     complete_note = f"type:fragmented_fallback;cpstools_sample_fail:{str(exc).replace(chr(9), ' ')}"
 
@@ -1692,8 +1740,18 @@ def build_sample_assembly_from_contigs(
                     final_parts.append(region_gap)
                     part_dict[part_key] = region_gap
                     missing_bp += exp
+        orient_notes: List[str] = []
+        if seed_parts:
+            for pname in ("LSC", "SSC"):
+                if pname in part_dict and pname in seed_parts:
+                    oseq, odir = orient_partition_to_seed(part_dict[pname], seed_parts[pname])
+                    part_dict[pname] = oseq
+                    orient_notes.append(f"{pname}:{odir}")
+        final_parts = [part_dict["LSC"], part_dict["IR"], part_dict["SSC"]]
         merged = "".join(final_parts)
         note = f"type:fragmented;single_ir:{ir_name};missing_bp:{missing_bp};expected_len:{expected_one_ir}"
+        if orient_notes:
+            note += ";part_orient:" + ",".join(orient_notes)
         out_fa = out_dir / f"{sample_name}.organellar.fasta"
         with out_fa.open("wt") as out:
             out.write(f">{sample_name}\n{merged}\n")
@@ -1755,6 +1813,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         args.min_non_n_len,
     )
     cp_regions: Optional[Dict[str, Tuple[int, int]]] = None
+    seed_parts: Optional[Dict[str, str]] = None
     expected_one_ir_len: Optional[int] = None
     if args.organelle_mode == "plant_pt" and args.pt_single_ir is None:
         logger.info("plant_pt mode detected: enabling --pt-single-ir by default.")
@@ -1770,6 +1829,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         )
     if args.organelle_mode == "plant_pt" and args.pt_single_ir:
         ir_name = choose_ir_name(cp_regions, args.pt_keep_ir)
+        seed_parts, _ = reorder_cp_single_ir_parts(seed_seq, cp_regions=cp_regions, keep_ir=args.pt_keep_ir)
         expected_one_ir_len = (
             region_len(*cp_regions["LSC"], total_len=len(seed_seq))
             + region_len(*cp_regions[ir_name], total_len=len(seed_seq))
@@ -1840,6 +1900,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                         pt_fragment_min_len=args.pt_fragment_min_len,
                         pt_complete_min_frac=args.pt_complete_min_frac,
                         seed_len=len(seed_seq),
+                        seed_parts=seed_parts,
                     )
                     seqs = read_fasta_sequences(Path(out_fa))
                     seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
