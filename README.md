@@ -286,7 +286,7 @@ OrganPath MSA2VCF \
 ```
 
 This command performs:
-1. MAFFT alignment with auto reverse-complement detection (`--adjustdirectionaccurately`)
+1. MAFFT alignment with auto reverse-complement detection (`--adjustdirection`)
 2. optional trimAl
 3. `snp-sites -v` to generate raw VCF from MSA
 4. `bcftools norm -a` to atomize complex/MNV records

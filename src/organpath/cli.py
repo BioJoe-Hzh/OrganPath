@@ -490,7 +490,7 @@ def run_alignment_with_direction(
     else:
         cmd += ["--thread", str(threads)]
     if adjust_direction:
-        cmd.append("--adjustdirectionaccurately")
+        cmd.append("--adjustdirection")
     cmd.append(str(multifasta))
     run_command(cmd, stdout_path=aligned)
 
@@ -2989,7 +2989,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-reverse",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use MAFFT --adjustdirectionaccurately during alignment",
+        help="Use MAFFT --adjustdirection during alignment",
     )
     p_run.add_argument(
         "--max-missing-frac",
@@ -3066,7 +3066,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_m2v.add_argument("-i", "--input", required=True, help="Input multifasta (e.g. assembled_samples.fasta)")
     p_m2v.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_m2v.add_argument("--mafft-bin", default="mafft", help="MAFFT executable name/path")
-    p_m2v.add_argument("--auto-reverse", action=argparse.BooleanOptionalAction, default=True, help="Use MAFFT --adjustdirectionaccurately")
+    p_m2v.add_argument("--auto-reverse", action=argparse.BooleanOptionalAction, default=True, help="Use MAFFT --adjustdirection")
     p_m2v.add_argument("--trim", action="store_true", help="Trim aligned MSA with trimAl before VCF conversion")
     p_m2v.add_argument("--trimal-bin", default="trimal", help="trimAl executable name/path")
     p_m2v.add_argument("--snp-sites-bin", default="snp-sites", help="snp-sites executable name/path")
@@ -3092,7 +3092,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-reverse",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Use MAFFT --adjustdirectionaccurately to auto-handle reverse-complement sequences (default: off)",
+        help="Use MAFFT --adjustdirection to auto-handle reverse-complement sequences (default: off)",
     )
     p_align.add_argument(
         "--trim",
