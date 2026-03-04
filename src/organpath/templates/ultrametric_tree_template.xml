@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><beast beautitemplate='Standard' beautistatus='' namespace="beast.core:beast.evolution.alignment:beast.evolution.tree.coalescent:beast.core.util:beast.evolution.nuc:beast.evolution.operators:beast.evolution.sitemodel:beast.evolution.substitutionmodel:beast.base.evolution.alignment:beast.pkgmgmt:beast.base.core:beast.base.inference:beast.base.evolution.tree.coalescent:beast.pkgmgmt:beast.base.core:beast.base.inference.util:beast.evolution.nuc:beast.base.evolution.operator:beast.base.inference.operator:beast.base.evolution.sitemodel:beast.base.evolution.substitutionmodel:beast.base.evolution.likelihood" required="BEAST.base v2.7.7" version="2.7">
+
+    <data
+id="ultrametric"
+spec="Alignment"
+name="alignment">
+        
+    </data>
+
+    <map name="Uniform" >beast.base.inference.distribution.Uniform</map>
+
+    <map name="Exponential" >beast.base.inference.distribution.Exponential</map>
+
+    <map name="LogNormal" >beast.base.inference.distribution.LogNormalDistributionModel</map>
+
+    <map name="Normal" >beast.base.inference.distribution.Normal</map>
+
+    <map name="Beta" >beast.base.inference.distribution.Beta</map>
+
+    <map name="Gamma" >beast.base.inference.distribution.Gamma</map>
+
+    <map name="LaplaceDistribution" >beast.base.inference.distribution.LaplaceDistribution</map>
+
+    <map name="prior" >beast.base.inference.distribution.Prior</map>
+
+    <map name="InverseGamma" >beast.base.inference.distribution.InverseGamma</map>
+
+    <map name="OneOnX" >beast.base.inference.distribution.OneOnX</map>
+
+    <run id="mcmc" spec="MCMC" chainLength="20000000" storeEvery="20000">
+        <state id="state" spec="State" storeEvery="5000">
+            <tree id="Tree.t:ultrametric" spec="beast.base.evolution.tree.Tree" name="stateNode">
+                <taxonset id="TaxonSet.ultrametric" spec="TaxonSet">
+                    <alignment idref="ultrametric"/>
+                </taxonset>
+            </tree>
+            <parameter id="rateAC.s:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode">1.0</parameter>
+            <parameter id="rateAG.s:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode">1.0</parameter>
+            <parameter id="rateAT.s:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode">1.0</parameter>
+            <parameter id="rateCG.s:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode">1.0</parameter>
+            <parameter id="rateGT.s:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode">1.0</parameter>
+            <parameter id="freqParameter.s:ultrametric" spec="parameter.RealParameter" dimension="4" lower="0.0" name="stateNode" upper="1.0">0.25</parameter>
+            <parameter id="proportionInvariant.s:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode" upper="1.0">0.0</parameter>
+            <parameter id="gammaShape.s:ultrametric" spec="parameter.RealParameter" lower="0.1" name="stateNode">1.0</parameter>
+            <parameter id="BDBirthRate.t:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode" upper="10000.0">1.0</parameter>
+            <parameter id="BDDeathRate.t:ultrametric" spec="parameter.RealParameter" lower="0.0" name="stateNode" upper="1.0">0.5</parameter>
+        </state>
+        <init id="RandomTree.t:ultrametric" spec="RandomTree" estimate="false" initial="@Tree.t:ultrametric" taxa="@ultrametric">
+            <populationModel id="ConstantPopulation0.t:ultrametric" spec="ConstantPopulation">
+                <parameter id="randomPopSize.t:ultrametric" spec="parameter.RealParameter" name="popSize">1.0</parameter>
+            </populationModel>
+        </init>
+        <distribution id="posterior" spec="CompoundDistribution">
+            <distribution id="prior" spec="CompoundDistribution">
+                <distribution id="BirthDeath.t:ultrametric" spec="beast.base.evolution.speciation.BirthDeathGernhard08Model" birthDiffRate="@BDBirthRate.t:ultrametric" relativeDeathRate="@BDDeathRate.t:ultrametric" tree="@Tree.t:ultrametric"/>
+                <prior id="BirthRatePrior.t:ultrametric" name="distribution" x="@BDBirthRate.t:ultrametric">
+                    <Uniform id="Uniform.3" name="distr" upper="1000.0"/>
+                </prior>
+                <prior id="DeathRatePrior.t:ultrametric" name="distribution" x="@BDDeathRate.t:ultrametric">
+                    <Uniform id="Uniform.4" name="distr"/>
+                </prior>
+                <prior id="FrequenciesPrior.s:ultrametric" name="distribution" x="@freqParameter.s:ultrametric">
+                    <distr id="Dirichlet.0" spec="distribution.Dirichlet">
+                        <parameter id="RealParameter.13" spec="parameter.RealParameter" dimension="4" estimate="false" name="alpha">4.0 4.0 4.0 4.0</parameter>
+                    </distr>
+                </prior>
+                <prior id="GammaShapePrior.s:ultrametric" name="distribution" x="@gammaShape.s:ultrametric">
+                    <Exponential id="Exponential.0" name="distr">
+                        <parameter id="RealParameter.0" spec="parameter.RealParameter" estimate="false" name="mean">1.0</parameter>
+                    </Exponential>
+                </prior>
+                <prior id="PropInvariantPrior.s:ultrametric" name="distribution" x="@proportionInvariant.s:ultrametric">
+                    <Uniform id="Uniform.2" name="distr"/>
+                </prior>
+                <prior id="RateACPrior.s:ultrametric" name="distribution" x="@rateAC.s:ultrametric">
+                    <Gamma id="Gamma.0" name="distr">
+                        <parameter id="RealParameter.1" spec="parameter.RealParameter" estimate="false" name="alpha">0.05</parameter>
+                        <parameter id="RealParameter.2" spec="parameter.RealParameter" estimate="false" name="beta">10.0</parameter>
+                    </Gamma>
+                </prior>
+                <prior id="RateAGPrior.s:ultrametric" name="distribution" x="@rateAG.s:ultrametric">
+                    <Gamma id="Gamma.1" name="distr">
+                        <parameter id="RealParameter.3" spec="parameter.RealParameter" estimate="false" name="alpha">0.05</parameter>
+                        <parameter id="RealParameter.4" spec="parameter.RealParameter" estimate="false" name="beta">20.0</parameter>
+                    </Gamma>
+                </prior>
+                <prior id="RateATPrior.s:ultrametric" name="distribution" x="@rateAT.s:ultrametric">
+                    <Gamma id="Gamma.2" name="distr">
+                        <parameter id="RealParameter.5" spec="parameter.RealParameter" estimate="false" name="alpha">0.05</parameter>
+                        <parameter id="RealParameter.6" spec="parameter.RealParameter" estimate="false" name="beta">10.0</parameter>
+                    </Gamma>
+                </prior>
+                <prior id="RateCGPrior.s:ultrametric" name="distribution" x="@rateCG.s:ultrametric">
+                    <Gamma id="Gamma.3" name="distr">
+                        <parameter id="RealParameter.7" spec="parameter.RealParameter" estimate="false" name="alpha">0.05</parameter>
+                        <parameter id="RealParameter.8" spec="parameter.RealParameter" estimate="false" name="beta">10.0</parameter>
+                    </Gamma>
+                </prior>
+                <prior id="RateGTPrior.s:ultrametric" name="distribution" x="@rateGT.s:ultrametric">
+                    <Gamma id="Gamma.5" name="distr">
+                        <parameter id="RealParameter.11" spec="parameter.RealParameter" estimate="false" name="alpha">0.05</parameter>
+                        <parameter id="RealParameter.12" spec="parameter.RealParameter" estimate="false" name="beta">10.0</parameter>
+                    </Gamma>
+                </prior>
+            </distribution>
+            <distribution id="likelihood" spec="CompoundDistribution" useThreads="true">
+                <distribution id="treeLikelihood.ultrametric" spec="ThreadedTreeLikelihood" data="@ultrametric" tree="@Tree.t:ultrametric">
+                    <siteModel id="SiteModel.s:ultrametric" spec="SiteModel" gammaCategoryCount="4" proportionInvariant="@proportionInvariant.s:ultrametric" shape="@gammaShape.s:ultrametric">
+                        <parameter id="mutationRate.s:ultrametric" spec="parameter.RealParameter" estimate="false" lower="0.0" name="mutationRate">1.0</parameter>
+                        <substModel id="gtr.s:ultrametric" spec="GTR" rateAC="@rateAC.s:ultrametric" rateAG="@rateAG.s:ultrametric" rateAT="@rateAT.s:ultrametric" rateCG="@rateCG.s:ultrametric" rateGT="@rateGT.s:ultrametric">
+                            <parameter id="rateCT.s:ultrametric" spec="parameter.RealParameter" estimate="false" lower="0.0" name="rateCT">1.0</parameter>
+                            <frequencies id="estimatedFreqs.s:ultrametric" spec="Frequencies" frequencies="@freqParameter.s:ultrametric"/>
+                        </substModel>
+                    </siteModel>
+                    <branchRateModel id="StrictClock.c:ultrametric" spec="beast.base.evolution.branchratemodel.StrictClockModel">
+                        <parameter id="clockRate.c:ultrametric" spec="parameter.RealParameter" estimate="false" lower="0.0" name="clock.rate">1.0</parameter>
+                    </branchRateModel>
+                </distribution>
+            </distribution>
+        </distribution>
+        <operator id="RateACScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="rateAC.s:ultrametric"/>
+            <operator id="AVMNOperator.ultrametric" spec="kernel.AdaptableVarianceMultivariateNormalOperator" allowNonsense="true" beta="0.05" burnin="400" initial="800" weight="0.1">
+                <transformations id="AVMNSumTransform.ultrametric" spec="operator.kernel.Transform$LogConstrainedSumTransform">
+                    <f idref="freqParameter.s:ultrametric"/>
+                </transformations>
+                <transformations id="AVMNLogTransform.ultrametric" spec="operator.kernel.Transform$LogTransform">
+                    <f idref="rateAC.s:ultrametric"/>
+                    <f idref="rateAG.s:ultrametric"/>
+                    <f idref="rateAT.s:ultrametric"/>
+                    <f idref="rateCG.s:ultrametric"/>
+                    <f idref="rateGT.s:ultrametric"/>
+                    <f idref="proportionInvariant.s:ultrametric"/>
+                    <f idref="gammaShape.s:ultrametric"/>
+                </transformations>
+                <transformations id="AVMNNoTransform.ultrametric" spec="operator.kernel.Transform$NoTransform">
+                    <f idref="Tree.t:ultrametric"/>
+                </transformations>
+            </operator>
+            <operator id="RateACScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@rateAC.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="RateAGScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="rateAG.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="RateAGScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@rateAG.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="RateATScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="rateAT.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="RateATScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@rateAT.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="RateCGScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="rateCG.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="RateCGScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@rateCG.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="RateGTScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="rateGT.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="RateGTScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@rateGT.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="FrequenciesExchanger.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="freqParameter.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="FrequenciesExchangerX.s:ultrametric" spec="operator.kernel.BactrianDeltaExchangeOperator" delta="0.01" weight="0.1">
+                <parameter idref="freqParameter.s:ultrametric"/>
+            </operator>
+        </operator>
+        <operator id="proportionInvariantScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="proportionInvariant.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="proportionInvariantScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@proportionInvariant.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="gammaShapeScaler.s:ultrametric" spec="AdaptableOperatorSampler" weight="0.05">
+            <parameter idref="gammaShape.s:ultrametric"/>
+            <operator idref="AVMNOperator.ultrametric"/>
+            <operator id="gammaShapeScalerX.s:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@gammaShape.s:ultrametric" scaleFactor="0.5" upper="10.0" weight="0.1"/>
+        </operator>
+        <operator id="BirthDeathBICEPSEpochTop.t:ultrametric" spec="EpochFlexOperator" scaleFactor="0.1" tree="@Tree.t:ultrametric" weight="2.0"/>
+        <operator id="BirthDeathBICEPSEpochAll.t:ultrametric" spec="EpochFlexOperator" fromOldestTipOnly="false" scaleFactor="0.1" tree="@Tree.t:ultrametric" weight="2.0"/>
+        <operator id="BirthDeathBICEPSTreeFlex.t:ultrametric" spec="TreeStretchOperator" scaleFactor="0.01" tree="@Tree.t:ultrametric" weight="2.0"/>
+        <operator id="BirthDeathTreeRootScaler.t:ultrametric" spec="kernel.BactrianScaleOperator" rootOnly="true" scaleFactor="0.1" tree="@Tree.t:ultrametric" upper="10.0" weight="3.0"/>
+        <operator id="BirthDeathUniformOperator.t:ultrametric" spec="kernel.BactrianNodeOperator" tree="@Tree.t:ultrametric" weight="30.0"/>
+        <operator id="BirthDeathSubtreeSlide.t:ultrametric" spec="kernel.BactrianSubtreeSlide" tree="@Tree.t:ultrametric" weight="15.0"/>
+        <operator id="BirthDeathNarrow.t:ultrametric" spec="Exchange" tree="@Tree.t:ultrametric" weight="15.0"/>
+        <operator id="BirthDeathWide.t:ultrametric" spec="Exchange" isNarrow="false" tree="@Tree.t:ultrametric" weight="3.0"/>
+        <operator id="BirthDeathWilsonBalding.t:ultrametric" spec="WilsonBalding" tree="@Tree.t:ultrametric" weight="3.0"/>
+        <operator id="BirthRateScaler.t:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@BDBirthRate.t:ultrametric" upper="10.0" weight="3.0"/>
+        <operator id="DeathRateScaler.t:ultrametric" spec="kernel.BactrianScaleOperator" parameter="@BDDeathRate.t:ultrametric" upper="10.0" weight="3.0"/>
+        <logger id="tracelog" spec="Logger" fileName="$(filebase).log" logEvery="1000" model="@posterior" sanitiseHeaders="true" sort="smart">
+            <log idref="posterior"/>
+            <log idref="likelihood"/>
+            <log idref="prior"/>
+            <log idref="treeLikelihood.ultrametric"/>
+            <log id="TreeHeight.t:ultrametric" spec="beast.base.evolution.tree.TreeStatLogger" tree="@Tree.t:ultrametric"/>
+            <log idref="rateAC.s:ultrametric"/>
+            <log idref="rateAG.s:ultrametric"/>
+            <log idref="rateAT.s:ultrametric"/>
+            <log idref="rateCG.s:ultrametric"/>
+            <log idref="rateGT.s:ultrametric"/>
+            <log idref="freqParameter.s:ultrametric"/>
+            <log idref="proportionInvariant.s:ultrametric"/>
+            <log idref="gammaShape.s:ultrametric"/>
+            <log idref="BirthDeath.t:ultrametric"/>
+            <log idref="BDBirthRate.t:ultrametric"/>
+            <log idref="BDDeathRate.t:ultrametric"/>
+        </logger>
+        <logger id="screenlog" spec="Logger" logEvery="1000">
+            <log idref="posterior"/>
+            <log idref="likelihood"/>
+            <log idref="prior"/>
+        </logger>
+        <logger id="treelog.t:ultrametric" spec="Logger" fileName="$(filebase)-$(tree).trees" logEvery="1000" mode="tree">
+            <log id="TreeWithMetaDataLogger.t:ultrametric" spec="beast.base.evolution.TreeWithMetaDataLogger" tree="@Tree.t:ultrametric"/>
+        </logger>
+        <operatorschedule id="OperatorSchedule" spec="OperatorSchedule"/>
+    </run>
+
+</beast>

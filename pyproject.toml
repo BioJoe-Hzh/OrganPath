@@ -21,3 +21,6 @@ PhyView = "organpath.cli:phyview_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+organpath = ["templates/*.xml"]

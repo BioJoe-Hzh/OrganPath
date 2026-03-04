@@ -31,8 +31,7 @@ ORG_SORT_DEFAULTS = {
     "animal_mt": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
 }
 DEFAULT_BEAST_TEMPLATE = (
-    "/Users/zh384/Desktop/scripts_dev/pipelines/eDNA_phylogeny/Organelle_pipelineV2/"
-    "2_Construct_phylogentic_framework/auxiliary_scripts/ultrametric_tree_template.xml"
+    Path(__file__).resolve().parent / "templates" / "ultrametric_tree_template.xml"
 )
 
 
@@ -669,7 +668,7 @@ def run_beast_pipeline(
 
 def resolve_beast_template_arg(template_arg: str) -> Path:
     if template_arg.strip().lower() == "default":
-        return Path(DEFAULT_BEAST_TEMPLATE).resolve()
+        return DEFAULT_BEAST_TEMPLATE.resolve()
     return Path(template_arg).resolve()
 
 
