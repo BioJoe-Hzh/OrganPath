@@ -446,13 +446,13 @@ def filter_vcf_and_build_consensus(
             multi.write(f">{out_name}\n{seq}\n")
 
 
-def run_command(cmd: List[str], stdout_path: Optional[Path] = None) -> None:
+def run_command(cmd: List[str], stdout_path: Optional[Path] = None, cwd: Optional[Path] = None) -> None:
     logger.info("Running: %s", " ".join(cmd))
     if stdout_path is None:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, cwd=str(cwd) if cwd else None)
         return
     with stdout_path.open("wt") as out:
-        subprocess.run(cmd, stdout=out, check=True)
+        subprocess.run(cmd, stdout=out, check=True, cwd=str(cwd) if cwd else None)
 
 
 def ensure_tool(name: str) -> str:
@@ -2660,6 +2660,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     norm_vcf = out_dir / f"{prefix}.atomized.norm.vcf"
     snp_prefix = out_dir / f"{prefix}.snp"
     prepare_prefix = out_dir / prefix
+    prepare_prefix_name = prefix
 
     bcftools_bin = ensure_tool(args.bcftools_bin)
     phynder_bin = ensure_tool(args.phynder_bin)
@@ -2695,7 +2696,22 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         ]
     )
     run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(norm_vcf)])
-    run_command([pathphynder_bin, "-s", "prepare", "-i", str(tree), "-p", str(prepare_prefix), "-f", str(snp_prefix)])
+    # pathPhynder prepare writes files under relative paths (e.g. tree_data/).
+    # Run inside out_dir and use basename prefix to avoid malformed tree_data/<abs_path>.
+    run_command(
+        [
+            pathphynder_bin,
+            "-s",
+            "prepare",
+            "-i",
+            str(tree),
+            "-p",
+            prepare_prefix_name,
+            "-f",
+            str(snp_prefix),
+        ],
+        cwd=out_dir,
+    )
 
     manifest = out_dir / "pathphynder_prepare_manifest.tsv"
     with manifest.open("wt") as out:
