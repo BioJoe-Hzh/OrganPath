@@ -531,17 +531,98 @@ def _strip_beast_annotations(newick: str, include_posterior: bool) -> str:
     return re.sub(r"\[&[^\]]+\]", "", newick)
 
 
+def _parse_nexus_translate(lines: List[str]) -> Dict[str, str]:
+    translate: Dict[str, str] = {}
+    in_translate = False
+    chunks: List[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not in_translate:
+            m = re.match(r"^\s*translate\b(.*)$", line, flags=re.IGNORECASE)
+            if not m:
+                continue
+            in_translate = True
+            rem = m.group(1).strip()
+            if rem:
+                chunks.append(rem)
+            if ";" in line:
+                in_translate = False
+                break
+            continue
+
+        chunks.append(line)
+        if ";" in line:
+            in_translate = False
+            break
+
+    if not chunks:
+        return translate
+
+    body = " ".join(chunks)
+    body = body.split(";", 1)[0].strip()
+    for part in body.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        m = re.match(r"^(\d+)\s+(.+)$", p)
+        if not m:
+            continue
+        key = m.group(1).strip()
+        name = m.group(2).strip()
+        if name.startswith("'") and name.endswith("'") and len(name) >= 2:
+            name = name[1:-1].replace("''", "'")
+        translate[key] = name
+    return translate
+
+
+def _apply_translate_to_newick(newick: str, translate: Dict[str, str]) -> str:
+    if not translate:
+        return newick
+
+    def repl(m: re.Match) -> str:
+        token = m.group(1)
+        return translate.get(token, token)
+
+    # Translate numeric tip labels emitted in NEXUS tree + Translate blocks.
+    return re.sub(r"(?<=\(|,)\s*([0-9]+)(?=\s*[:),])", repl, newick)
+
+
 def nexus_tree_to_newick(nexus_path: Path, out_newick: Path, include_posterior: bool) -> None:
     tree_txt: Optional[str] = None
-    pat = re.compile(r"^\s*tree\s+.+?=\s*(.+)$", flags=re.IGNORECASE)
     with nexus_path.open("rt") as fh:
-        for raw in fh:
-            m = pat.match(raw.strip())
-            if m:
-                tree_txt = m.group(1).strip()
+        lines = fh.readlines()
+
+    translate = _parse_nexus_translate(lines)
+
+    tree_start = re.compile(r"^\s*tree\s+.+?=\s*(.*)$", flags=re.IGNORECASE)
+    collecting = False
+    chunks: List[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not collecting:
+            m = tree_start.match(line)
+            if not m:
+                continue
+            collecting = True
+            first = m.group(1).strip()
+            if first:
+                chunks.append(first)
+            if ";" in line:
+                tree_txt = " ".join(chunks).strip()
+                collecting = False
+                chunks = []
+            continue
+
+        chunks.append(line)
+        if ";" in line:
+            tree_txt = " ".join(chunks).strip()
+            collecting = False
+            chunks = []
+
     if not tree_txt:
         raise ValueError(f"No tree line found in NEXUS: {nexus_path}")
     cleaned = _strip_beast_annotations(tree_txt, include_posterior=include_posterior)
+    cleaned = _apply_translate_to_newick(cleaned, translate)
     if not cleaned.endswith(";"):
         cleaned += ";"
     out_newick.write_text(cleaned + "\n")
