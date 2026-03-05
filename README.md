@@ -198,6 +198,8 @@ OrganPath Pathphynder \
   -o pathphynder_findpath_out \
   --fastq sample.fastq.gz \
   --sample-id SAMPLE1 \
+  --bwa-aln-seedlen 1024 \
+  --bwa-aln-mismatch 0.01 \
   --min-mapq 20 \
   --min-baseq 20
 ```

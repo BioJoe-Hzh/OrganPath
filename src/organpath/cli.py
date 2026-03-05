@@ -2788,6 +2788,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     dmg_dir.mkdir(parents=True, exist_ok=True)
     place_dir.mkdir(parents=True, exist_ok=True)
 
+    sai = align_dir / f"{sample_id}.sai"
     sam = align_dir / f"{sample_id}.sam"
     mapped_bam = align_dir / f"{sample_id}.mapped.q{args.min_mapq}.bam"
     name_sorted_bam = align_dir / f"{sample_id}.namesort.bam"
@@ -2795,8 +2796,26 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     coord_bam = align_dir / f"{sample_id}.coordsort.bam"
     dedup_bam = align_dir / f"{sample_id}.q{args.min_mapq}.rmdup.bam"
 
-    bwa_cmd = [bwa_bin, "mem", "-t", str(args.threads), str(ref), str(fq1)]
-    run_command(bwa_cmd, stdout_path=sam)
+    # aDNA-friendly mapping defaults: bwa aln + samse
+    run_command(
+        [
+            bwa_bin,
+            "aln",
+            "-l",
+            str(args.bwa_aln_seedlen),
+            "-n",
+            str(args.bwa_aln_mismatch),
+            "-t",
+            str(args.threads),
+            str(ref),
+            str(fq1),
+        ],
+        stdout_path=sai,
+    )
+    run_command(
+        [bwa_bin, "samse", str(ref), str(sai), str(fq1)],
+        stdout_path=sam,
+    )
     run_command([samtools_bin, "view", "-bS", "-F", "4", "-q", str(args.min_mapq), "-o", str(mapped_bam), str(sam)])
     run_command([samtools_bin, "sort", "-n", "-@", str(args.threads), "-o", str(name_sorted_bam), str(mapped_bam)])
     run_command([samtools_bin, "fixmate", "-m", str(name_sorted_bam), str(fixmate_bam)])
@@ -3520,6 +3539,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("--phynder-bin", default="phynder", help="phynder executable name/path")
     p_pp.add_argument("--pathphynder-bin", default="pathPhynder", help="pathPhynder executable name/path")
     p_pp.add_argument("--bwa-bin", default="bwa", help="bwa executable name/path (for --findpath)")
+    p_pp.add_argument("--bwa-aln-seedlen", type=int, default=1024, help="bwa aln -l seed length (default aDNA-friendly: 1024)")
+    p_pp.add_argument("--bwa-aln-mismatch", default="0.01", help="bwa aln -n mismatch fraction/edits (default: 0.01)")
     p_pp.add_argument("--samtools-bin", default="samtools", help="samtools executable name/path (for --findpath)")
     p_pp.add_argument("--mapdamage-bin", default="mapDamage", help="mapDamage executable name/path (for --findpath)")
     p_pp.add_argument("--mapdamage-args", nargs="*", default=[], help="Extra args passed to mapDamage in --findpath")
