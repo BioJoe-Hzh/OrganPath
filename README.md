@@ -187,6 +187,20 @@ This runs:
 - `pathPhynder -s prepare` to build prepare files
 - writes `pathphynder_prepare_manifest.tsv` for downstream usage
 
+Run Pathphynder placement directly from FASTQ (map to ref -> MAPQ filter -> remove duplicates -> mapDamage rescale -> `pathPhynder -s all`):
+
+```bash
+OrganPath Pathphynder \
+  --findpath \
+  --prepare-manifest pathphynder_prepare_out/pathphynder_prepare_manifest.tsv \
+  -o pathphynder_findpath_out \
+  --fastq1 sample.R1.fastq.gz \
+  --fastq2 sample.R2.fastq.gz \
+  --sample-id SAMPLE1 \
+  --min-mapq 20 \
+  --min-baseq 20
+```
+
 For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
 When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.
 

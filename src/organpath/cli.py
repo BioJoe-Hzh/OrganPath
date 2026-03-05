@@ -465,6 +465,9 @@ def ensure_tool(name: str) -> str:
             "iqtree2": "Please install IQ-TREE (iqtree/iqtree2) and ensure it is in PATH.",
             "snp-sites": "Please install snp-sites and ensure `snp-sites` is in PATH.",
             "bcftools": "Please install bcftools and ensure `bcftools` is in PATH.",
+            "bwa": "Please install bwa and ensure `bwa` is in PATH.",
+            "samtools": "Please install samtools and ensure `samtools` is in PATH.",
+            "mapDamage": "Please install mapDamage and ensure `mapDamage` is in PATH.",
             "beast": "Please install BEAST2 and ensure `beast` is in PATH.",
             "treeannotator": "Please install BEAST2 tools and ensure `treeannotator` is in PATH.",
         }.get(name, f"Please install `{name}` and add it to PATH.")
@@ -2640,93 +2643,224 @@ def resolve_pathphynder_bin(preferred: str) -> str:
     )
 
 
+def read_prepare_manifest(path: Path) -> Dict[str, str]:
+    kv: Dict[str, str] = {}
+    with path.open("rt") as fh:
+        for i, raw in enumerate(fh):
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            if i == 0 and line.lower().startswith("key\tvalue"):
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            kv[parts[0]] = parts[1]
+    return kv
+
+
 def cmd_pathphynder(args: argparse.Namespace) -> int:
-    if not args.prepare:
-        raise ValueError("Currently only --prepare mode is implemented for OrganPath Pathphynder.")
+    mode_count = int(args.prepare) + int(args.findpath)
+    if mode_count != 1:
+        raise ValueError("Pathphynder requires exactly one mode: --prepare or --findpath")
 
     out_dir = Path(args.outdir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    vcf = Path(args.vcf).resolve()
-    tree = Path(args.tree).resolve()
-    ref = Path(args.ref).resolve()
-    if not vcf.exists():
-        raise FileNotFoundError(f"VCF not found: {vcf}")
+    pathphynder_bin = resolve_pathphynder_bin(args.pathphynder_bin)
+
+    if args.prepare:
+        if not args.vcf or not args.tree or not args.ref:
+            raise ValueError("--prepare requires -v/--vcf, -t/--tree, and -r/--ref")
+        vcf = Path(args.vcf).resolve()
+        tree = Path(args.tree).resolve()
+        ref = Path(args.ref).resolve()
+        if not vcf.exists():
+            raise FileNotFoundError(f"VCF not found: {vcf}")
+        if not tree.exists():
+            raise FileNotFoundError(f"Tree not found: {tree}")
+        if not ref.exists():
+            raise FileNotFoundError(f"Reference not found: {ref}")
+
+        prefix = args.prefix or tree.stem
+        norm_vcf = out_dir / f"{prefix}.atomized.norm.vcf"
+        snp_prefix = out_dir / f"{prefix}.snp"
+        prepare_prefix = out_dir / prefix
+        prepare_prefix_name = prefix
+
+        bcftools_bin = ensure_tool(args.bcftools_bin)
+        phynder_bin = ensure_tool(args.phynder_bin)
+
+        try:
+            _hdr, vcf_samples = read_header_and_samples(vcf)
+            tips = set(extract_tree_tip_names(tree.read_text()))
+            overlap = len(set(vcf_samples) & tips)
+            logger.info(
+                "Pathphynder prepare check: VCF samples=%d, tree tips=%d, overlap=%d",
+                len(vcf_samples),
+                len(tips),
+                overlap,
+            )
+        except Exception as exc:
+            logger.warning("Could not compute VCF/tree overlap before prepare: %s", exc)
+
+        # Keep positional system intact: atomize/split variants without filtering.
+        run_command(
+            [
+                bcftools_bin,
+                "norm",
+                "-m",
+                "-any",
+                "-a",
+                "-f",
+                str(ref),
+                str(vcf),
+                "-Ov",
+                "-o",
+                str(norm_vcf),
+            ]
+        )
+        run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(norm_vcf)])
+        # pathPhynder prepare writes files under relative paths (e.g. tree_data/).
+        # Run inside out_dir and use basename prefix to avoid malformed tree_data/<abs_path>.
+        run_command(
+            [
+                pathphynder_bin,
+                "-s",
+                "prepare",
+                "-i",
+                str(tree),
+                "-p",
+                prepare_prefix_name,
+                "-f",
+                str(snp_prefix),
+            ],
+            cwd=out_dir,
+        )
+
+        manifest = out_dir / "pathphynder_prepare_manifest.tsv"
+        with manifest.open("wt") as out:
+            out.write("key\tvalue\n")
+            out.write(f"tree\t{tree}\n")
+            out.write(f"vcf\t{vcf}\n")
+            out.write(f"normalized_vcf\t{norm_vcf}\n")
+            out.write(f"ref\t{ref}\n")
+            out.write(f"snp_prefix\t{snp_prefix}\n")
+            out.write(f"prepare_prefix\t{prepare_prefix}\n")
+            out.write(f"bcftools_bin\t{bcftools_bin}\n")
+            out.write(f"phynder_bin\t{phynder_bin}\n")
+            out.write(f"pathphynder_bin\t{pathphynder_bin}\n")
+        logger.info("Pathphynder prepare completed. Manifest: %s", manifest)
+        return 0
+
+    # --findpath mode
+    if not args.prepare_manifest:
+        raise ValueError("--findpath requires --prepare-manifest from previous Pathphynder --prepare output")
+    if not args.fastq1:
+        raise ValueError("--findpath requires --fastq1 (and optionally --fastq2)")
+    manifest_path = Path(args.prepare_manifest).resolve()
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"prepare manifest not found: {manifest_path}")
+    m = read_prepare_manifest(manifest_path)
+
+    tree = Path(args.tree).resolve() if args.tree else Path(m.get("tree", "")).resolve()
+    ref = Path(args.ref).resolve() if args.ref else Path(m.get("ref", "")).resolve()
+    snp_prefix = Path(args.snp_prefix).resolve() if args.snp_prefix else Path(m.get("snp_prefix", "")).resolve()
+    prepare_prefix = Path(args.prepare_prefix).resolve() if args.prepare_prefix else Path(m.get("prepare_prefix", "")).resolve()
     if not tree.exists():
         raise FileNotFoundError(f"Tree not found: {tree}")
     if not ref.exists():
         raise FileNotFoundError(f"Reference not found: {ref}")
+    if not snp_prefix.with_suffix(".bed").exists():
+        raise FileNotFoundError(f"SNP panel prefix not found (expected .bed): {snp_prefix}.bed")
+    if not prepare_prefix.parent.exists():
+        raise FileNotFoundError(f"Prepare prefix parent directory not found: {prepare_prefix.parent}")
 
-    prefix = args.prefix or tree.stem
-    norm_vcf = out_dir / f"{prefix}.atomized.norm.vcf"
-    snp_prefix = out_dir / f"{prefix}.snp"
-    prepare_prefix = out_dir / prefix
-    prepare_prefix_name = prefix
+    fq1 = Path(args.fastq1).resolve()
+    fq2 = Path(args.fastq2).resolve() if args.fastq2 else None
+    if not fq1.exists():
+        raise FileNotFoundError(f"FASTQ1 not found: {fq1}")
+    if fq2 and not fq2.exists():
+        raise FileNotFoundError(f"FASTQ2 not found: {fq2}")
 
-    bcftools_bin = ensure_tool(args.bcftools_bin)
-    phynder_bin = ensure_tool(args.phynder_bin)
-    pathphynder_bin = resolve_pathphynder_bin(args.pathphynder_bin)
+    sample_id = args.sample_id or re.sub(r"(\.fastq|\.fq)(\.gz)?$", "", fq1.name, flags=re.IGNORECASE)
+    bwa_bin = ensure_tool(args.bwa_bin)
+    samtools_bin = ensure_tool(args.samtools_bin)
+    mapdamage_bin = ensure_tool(args.mapdamage_bin)
 
-    try:
-        _hdr, vcf_samples = read_header_and_samples(vcf)
-        tips = set(extract_tree_tip_names(tree.read_text()))
-        overlap = len(set(vcf_samples) & tips)
-        logger.info(
-            "Pathphynder prepare check: VCF samples=%d, tree tips=%d, overlap=%d",
-            len(vcf_samples),
-            len(tips),
-            overlap,
+    align_dir = out_dir / "align"
+    dmg_dir = out_dir / "mapdamage"
+    place_dir = out_dir / "placement"
+    align_dir.mkdir(parents=True, exist_ok=True)
+    dmg_dir.mkdir(parents=True, exist_ok=True)
+    place_dir.mkdir(parents=True, exist_ok=True)
+
+    sam = align_dir / f"{sample_id}.sam"
+    mapped_bam = align_dir / f"{sample_id}.mapped.q{args.min_mapq}.bam"
+    name_sorted_bam = align_dir / f"{sample_id}.namesort.bam"
+    fixmate_bam = align_dir / f"{sample_id}.fixmate.bam"
+    coord_bam = align_dir / f"{sample_id}.coordsort.bam"
+    dedup_bam = align_dir / f"{sample_id}.q{args.min_mapq}.rmdup.bam"
+
+    bwa_cmd = [bwa_bin, "mem", "-t", str(args.threads), str(ref), str(fq1)]
+    if fq2:
+        bwa_cmd.append(str(fq2))
+    run_command(bwa_cmd, stdout_path=sam)
+    run_command([samtools_bin, "view", "-bS", "-F", "4", "-q", str(args.min_mapq), "-o", str(mapped_bam), str(sam)])
+    run_command([samtools_bin, "sort", "-n", "-@", str(args.threads), "-o", str(name_sorted_bam), str(mapped_bam)])
+    run_command([samtools_bin, "fixmate", "-m", str(name_sorted_bam), str(fixmate_bam)])
+    run_command([samtools_bin, "sort", "-@", str(args.threads), "-o", str(coord_bam), str(fixmate_bam)])
+    run_command([samtools_bin, "markdup", "-r", str(coord_bam), str(dedup_bam)])
+    run_command([samtools_bin, "index", str(dedup_bam)])
+
+    mapdamage_cmd = [mapdamage_bin, "-i", str(dedup_bam), "-r", str(ref), "--rescale", "-d", str(dmg_dir)] + list(args.mapdamage_args)
+    run_command(mapdamage_cmd)
+
+    candidates = list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"mapDamage completed but no rescaled BAM found under {dmg_dir}. "
+            "Please inspect mapDamage outputs or pass --mapdamage-args compatible with your version."
         )
-    except Exception as exc:
-        logger.warning("Could not compute VCF/tree overlap before prepare: %s", exc)
+    rescaled_bam = sorted(candidates)[0]
+    run_command([samtools_bin, "index", str(rescaled_bam)])
 
-    # Keep positional system intact: atomize/split variants without filtering.
-    run_command(
-        [
-            bcftools_bin,
-            "norm",
-            "-m",
-            "-any",
-            "-a",
-            "-f",
-            str(ref),
-            str(vcf),
-            "-Ov",
-            "-o",
-            str(norm_vcf),
-        ]
-    )
-    run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(norm_vcf)])
-    # pathPhynder prepare writes files under relative paths (e.g. tree_data/).
-    # Run inside out_dir and use basename prefix to avoid malformed tree_data/<abs_path>.
-    run_command(
-        [
-            pathphynder_bin,
-            "-s",
-            "prepare",
-            "-i",
-            str(tree),
-            "-p",
-            prepare_prefix_name,
-            "-f",
-            str(snp_prefix),
-        ],
-        cwd=out_dir,
-    )
+    out_prefix = place_dir / sample_id
+    path_cmd = [
+        pathphynder_bin,
+        "-s",
+        "all",
+        "-i",
+        str(tree),
+        "-p",
+        str(prepare_prefix),
+        "-f",
+        str(snp_prefix),
+        "-r",
+        str(ref),
+        "-q",
+        str(rescaled_bam),
+        "-Q",
+        str(args.min_baseq),
+        "-o",
+        str(out_prefix),
+    ] + list(args.pathphynder_args)
+    run_command(path_cmd, cwd=out_dir)
 
-    manifest = out_dir / "pathphynder_prepare_manifest.tsv"
-    with manifest.open("wt") as out:
+    find_manifest = out_dir / "pathphynder_findpath_manifest.tsv"
+    with find_manifest.open("wt") as out:
         out.write("key\tvalue\n")
+        out.write(f"prepare_manifest\t{manifest_path}\n")
         out.write(f"tree\t{tree}\n")
-        out.write(f"vcf\t{vcf}\n")
-        out.write(f"normalized_vcf\t{norm_vcf}\n")
         out.write(f"ref\t{ref}\n")
         out.write(f"snp_prefix\t{snp_prefix}\n")
         out.write(f"prepare_prefix\t{prepare_prefix}\n")
-        out.write(f"bcftools_bin\t{bcftools_bin}\n")
-        out.write(f"phynder_bin\t{phynder_bin}\n")
-        out.write(f"pathphynder_bin\t{pathphynder_bin}\n")
-
-    logger.info("Pathphynder prepare completed. Manifest: %s", manifest)
+        out.write(f"sample_id\t{sample_id}\n")
+        out.write(f"fastq1\t{fq1}\n")
+        out.write(f"fastq2\t{fq2 if fq2 else '-'}\n")
+        out.write(f"dedup_bam\t{dedup_bam}\n")
+        out.write(f"rescaled_bam\t{rescaled_bam}\n")
+        out.write(f"pathphynder_prefix\t{out_prefix}\n")
+    logger.info("Pathphynder findpath completed. Manifest: %s", find_manifest)
     return 0
 
 
@@ -3372,18 +3506,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_pp = subs.add_parser(
         "Pathphynder",
-        help="Prepare Pathphynder panel files from VCF+tree",
+        help="Prepare Pathphynder panel files or run sample placement from FASTQ",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p_pp.add_argument("--prepare", action="store_true", help="Run prepare mode (phynder -B + pathPhynder -s prepare)")
-    p_pp.add_argument("-v", "--vcf", required=True, help="Input VCF/VCF.GZ for panel variants")
-    p_pp.add_argument("-r", "--ref", required=True, help="Reference fasta (recorded for downstream pathPhynder all mode)")
-    p_pp.add_argument("-t", "--tree", required=True, help="Input Newick tree")
+    p_pp.add_argument("--prepare", action="store_true", help="Run prepare mode (bcftools norm + phynder -B + pathPhynder -s prepare)")
+    p_pp.add_argument("--findpath", action="store_true", help="Run findpath mode (FASTQ->BAM->mapDamage rescale->pathPhynder -s all)")
+    p_pp.add_argument("-v", "--vcf", help="Input VCF/VCF.GZ for panel variants (required for --prepare)")
+    p_pp.add_argument("-r", "--ref", help="Reference fasta (required for --prepare; optional override for --findpath)")
+    p_pp.add_argument("-t", "--tree", help="Input Newick tree (required for --prepare; optional override for --findpath)")
     p_pp.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_pp.add_argument("--prefix", help="Output prefix (default: tree filename stem)")
+    p_pp.add_argument("--prepare-manifest", help="Manifest from Pathphynder --prepare mode (required for --findpath)")
+    p_pp.add_argument("--prepare-prefix", help="Override prepare_prefix from manifest (for --findpath)")
+    p_pp.add_argument("--snp-prefix", help="Override snp_prefix from manifest (for --findpath)")
+    p_pp.add_argument("--fastq1", help="Input FASTQ R1 (required for --findpath)")
+    p_pp.add_argument("--fastq2", help="Input FASTQ R2 (optional for --findpath)")
+    p_pp.add_argument("--sample-id", help="Sample ID used for output naming in --findpath")
+    p_pp.add_argument("--threads", type=int, default=8, help="Threads for bwa/samtools")
+    p_pp.add_argument("--min-mapq", type=int, default=20, help="Minimum mapping quality for BAM filtering in --findpath")
+    p_pp.add_argument("--min-baseq", type=int, default=20, help="Minimum base quality passed to pathPhynder in --findpath")
     p_pp.add_argument("--bcftools-bin", default="bcftools", help="bcftools executable name/path")
     p_pp.add_argument("--phynder-bin", default="phynder", help="phynder executable name/path")
     p_pp.add_argument("--pathphynder-bin", default="pathPhynder", help="pathPhynder executable name/path")
+    p_pp.add_argument("--bwa-bin", default="bwa", help="bwa executable name/path (for --findpath)")
+    p_pp.add_argument("--samtools-bin", default="samtools", help="samtools executable name/path (for --findpath)")
+    p_pp.add_argument("--mapdamage-bin", default="mapDamage", help="mapDamage executable name/path (for --findpath)")
+    p_pp.add_argument("--mapdamage-args", nargs="*", default=[], help="Extra args passed to mapDamage in --findpath")
+    p_pp.add_argument("--pathphynder-args", nargs="*", default=[], help="Extra args appended to pathPhynder in --findpath")
     p_pp.set_defaults(func=cmd_pathphynder)
 
     p_phy = subs.add_parser("PhyView", help="Run one selected phylogenetic/relationship task on trimmed multifasta")
