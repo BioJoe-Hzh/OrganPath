@@ -2759,14 +2759,16 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         raise ValueError(f"--tree_data must be a directory: {tree_data}")
 
     panel_dir = tree_data.parent
-    snp_beds = sorted(panel_dir.glob("*.snp.bed"))
-    if len(snp_beds) != 1:
+    site_beds = sorted(tree_data.glob("*.sites.bed"))
+    if len(site_beds) != 1:
         raise ValueError(
-            f"Expected exactly one '*.snp.bed' under {panel_dir}, found {len(snp_beds)}. "
+            f"Expected exactly one '*.sites.bed' under {tree_data}, found {len(site_beds)}. "
             "Please keep one panel per output directory."
         )
-    snp_prefix = snp_beds[0].with_suffix("")  # remove .bed -> <prefix>.snp
-    prepare_prefix_name = snp_prefix.name[:-4] if snp_prefix.name.endswith(".snp") else snp_prefix.name
+    prepare_prefix_name = site_beds[0].name[:-10]  # remove '.sites.bed'
+    snp_prefix = panel_dir / f"{prepare_prefix_name}.snp"
+    if not snp_prefix.exists():
+        raise FileNotFoundError(f"Expected SNP panel file not found: {snp_prefix}")
     prepare_prefix = panel_dir / prepare_prefix_name
 
     fq1 = Path(args.fastq).resolve()
