@@ -2643,22 +2643,6 @@ def resolve_pathphynder_bin(preferred: str) -> str:
     )
 
 
-def read_prepare_manifest(path: Path) -> Dict[str, str]:
-    kv: Dict[str, str] = {}
-    with path.open("rt") as fh:
-        for i, raw in enumerate(fh):
-            line = raw.rstrip("\n")
-            if not line:
-                continue
-            if i == 0 and line.lower().startswith("key\tvalue"):
-                continue
-            parts = line.split("\t", 1)
-            if len(parts) != 2:
-                continue
-            kv[parts[0]] = parts[1]
-    return kv
-
-
 def cmd_pathphynder(args: argparse.Namespace) -> int:
     mode_count = int(args.prepare) + int(args.findpath)
     if mode_count != 1:
@@ -2753,46 +2737,42 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         return 0
 
     # --findpath mode
-    if not args.fastq and not args.fastq1:
-        raise ValueError("--findpath requires --fastq (single-end). --fastq1 is accepted for backward compatibility.")
+    if not args.tree:
+        raise ValueError("--findpath requires -t/--tree")
+    if not args.ref:
+        raise ValueError("--findpath requires -r/--ref")
+    if not args.fastq:
+        raise ValueError("--findpath requires --fastq (single-end)")
+    if not args.tree_data:
+        raise ValueError("--findpath requires --tree_data (prepare output tree_data directory)")
 
-    manifest_path: Optional[Path] = None
-    m: Dict[str, str] = {}
-    if args.prepare_manifest:
-        manifest_path = Path(args.prepare_manifest).resolve()
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"prepare manifest not found: {manifest_path}")
-        m = read_prepare_manifest(manifest_path)
-
-    tree = Path(args.tree).resolve() if args.tree else Path(m.get("tree", "")).resolve()
-    ref = Path(args.ref).resolve() if args.ref else Path(m.get("ref", "")).resolve()
-    snp_prefix = Path(args.snp_prefix).resolve() if args.snp_prefix else Path(m.get("snp_prefix", "")).resolve()
-    prepare_prefix = Path(args.prepare_prefix).resolve() if args.prepare_prefix else Path(m.get("prepare_prefix", "")).resolve()
-    tree_data = Path(args.tree_data).resolve() if args.tree_data else None
-    if tree_data is None and manifest_path is not None:
-        candidate = manifest_path.parent / "tree_data"
-        if candidate.exists():
-            tree_data = candidate.resolve()
+    tree = Path(args.tree).resolve()
+    ref = Path(args.ref).resolve()
+    tree_data = Path(args.tree_data).resolve()
     if not tree.exists():
         raise FileNotFoundError(f"Tree not found: {tree}")
     if not ref.exists():
         raise FileNotFoundError(f"Reference not found: {ref}")
-    if not snp_prefix.with_suffix(".bed").exists():
-        raise FileNotFoundError(f"SNP panel prefix not found (expected .bed): {snp_prefix}.bed")
-    if not prepare_prefix.parent.exists():
-        raise FileNotFoundError(f"Prepare prefix parent directory not found: {prepare_prefix.parent}")
-    if tree_data is None or not tree_data.exists():
-        raise FileNotFoundError(
-            "--findpath requires --tree_data (path to prepare output tree_data directory), "
-            f"or a valid --prepare-manifest with existing tree_data beside it. Got: {tree_data}"
-        )
+    if not tree_data.exists():
+        raise FileNotFoundError(f"tree_data directory not found: {tree_data}")
+    if not tree_data.is_dir():
+        raise ValueError(f"--tree_data must be a directory: {tree_data}")
 
-    fq1 = Path(args.fastq or args.fastq1).resolve()
-    fq2 = Path(args.fastq2).resolve() if args.fastq2 else None
+    panel_dir = tree_data.parent
+    snp_beds = sorted(panel_dir.glob("*.snp.bed"))
+    if len(snp_beds) != 1:
+        raise ValueError(
+            f"Expected exactly one '*.snp.bed' under {panel_dir}, found {len(snp_beds)}. "
+            "Please keep one panel per output directory."
+        )
+    snp_prefix = snp_beds[0].with_suffix("")  # remove .bed -> <prefix>.snp
+    prepare_prefix_name = snp_prefix.name[:-4] if snp_prefix.name.endswith(".snp") else snp_prefix.name
+    prepare_prefix = panel_dir / prepare_prefix_name
+
+    fq1 = Path(args.fastq).resolve()
+    fq2 = None
     if not fq1.exists():
         raise FileNotFoundError(f"FASTQ not found: {fq1}")
-    if fq2 and not fq2.exists():
-        raise FileNotFoundError(f"FASTQ2 not found: {fq2}")
 
     sample_id = args.sample_id or re.sub(r"(\.fastq|\.fq)(\.gz)?$", "", fq1.name, flags=re.IGNORECASE)
     bwa_bin = ensure_tool(args.bwa_bin)
@@ -2814,8 +2794,6 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     dedup_bam = align_dir / f"{sample_id}.q{args.min_mapq}.rmdup.bam"
 
     bwa_cmd = [bwa_bin, "mem", "-t", str(args.threads), str(ref), str(fq1)]
-    if fq2:
-        bwa_cmd.append(str(fq2))
     run_command(bwa_cmd, stdout_path=sam)
     run_command([samtools_bin, "view", "-bS", "-F", "4", "-q", str(args.min_mapq), "-o", str(mapped_bam), str(sam)])
     run_command([samtools_bin, "sort", "-n", "-@", str(args.threads), "-o", str(name_sorted_bam), str(mapped_bam)])
@@ -2844,7 +2822,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         "-i",
         str(tree),
         "-p",
-        str(prepare_prefix),
+        prepare_prefix_name,
         "-f",
         str(snp_prefix),
         "-r",
@@ -2858,12 +2836,11 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         "--tree_data",
         str(tree_data),
     ] + list(args.pathphynder_args)
-    run_command(path_cmd, cwd=out_dir)
+    run_command(path_cmd, cwd=panel_dir)
 
     find_manifest = out_dir / "pathphynder_findpath_manifest.tsv"
     with find_manifest.open("wt") as out:
         out.write("key\tvalue\n")
-        out.write(f"prepare_manifest\t{manifest_path if manifest_path else '-'}\n")
         out.write(f"tree\t{tree}\n")
         out.write(f"ref\t{ref}\n")
         out.write(f"snp_prefix\t{snp_prefix}\n")
@@ -2871,7 +2848,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         out.write(f"tree_data\t{tree_data}\n")
         out.write(f"sample_id\t{sample_id}\n")
         out.write(f"fastq1\t{fq1}\n")
-        out.write(f"fastq2\t{fq2 if fq2 else '-'}\n")
+        out.write("fastq2\t-\n")
         out.write(f"dedup_bam\t{dedup_bam}\n")
         out.write(f"rescaled_bam\t{rescaled_bam}\n")
         out.write(f"pathphynder_prefix\t{out_prefix}\n")
@@ -3527,17 +3504,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("--prepare", action="store_true", help="Run prepare mode (bcftools norm + phynder -B + pathPhynder -s prepare)")
     p_pp.add_argument("--findpath", action="store_true", help="Run findpath mode (FASTQ->BAM->mapDamage rescale->pathPhynder -s all)")
     p_pp.add_argument("-v", "--vcf", help="Input VCF/VCF.GZ for panel variants (required for --prepare)")
-    p_pp.add_argument("-r", "--ref", help="Reference fasta (required for --prepare; optional override for --findpath)")
-    p_pp.add_argument("-t", "--tree", help="Input Newick tree (required for --prepare; optional override for --findpath)")
+    p_pp.add_argument("-r", "--ref", help="Reference fasta (required for --prepare and --findpath)")
+    p_pp.add_argument("-t", "--tree", help="Input Newick tree (required for --prepare and --findpath)")
     p_pp.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_pp.add_argument("--prefix", help="Output prefix (default: tree filename stem)")
-    p_pp.add_argument("--prepare-manifest", help="Manifest from Pathphynder --prepare mode (required for --findpath)")
-    p_pp.add_argument("--prepare-prefix", help="Override prepare_prefix from manifest (for --findpath)")
-    p_pp.add_argument("--snp-prefix", help="Override snp_prefix from manifest (for --findpath)")
-    p_pp.add_argument("--tree_data", help="Path to pathPhynder prepare output tree_data directory (required for --findpath unless inferable from manifest)")
+    p_pp.add_argument("--tree_data", help="Path to pathPhynder prepare output tree_data directory (required for --findpath)")
     p_pp.add_argument("--fastq", help="Input single-end FASTQ (required for --findpath)")
-    p_pp.add_argument("--fastq1", help="Input FASTQ R1 (required for --findpath)")
-    p_pp.add_argument("--fastq2", help="Input FASTQ R2 (optional for --findpath)")
     p_pp.add_argument("--sample-id", help="Sample ID used for output naming in --findpath")
     p_pp.add_argument("--threads", type=int, default=8, help="Threads for bwa/samtools")
     p_pp.add_argument("--min-mapq", type=int, default=20, help="Minimum mapping quality for BAM filtering in --findpath")

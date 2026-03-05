@@ -193,7 +193,8 @@ Run Pathphynder placement directly from FASTQ (map to ref -> MAPQ filter -> remo
 OrganPath Pathphynder \
   --findpath \
   --tree_data pathphynder_prepare_out/tree_data \
-  --prepare-manifest pathphynder_prepare_out/pathphynder_prepare_manifest.tsv \
+  -t tree.nwk \
+  -r ref.fa \
   -o pathphynder_findpath_out \
   --fastq sample.fastq.gz \
   --sample-id SAMPLE1 \
