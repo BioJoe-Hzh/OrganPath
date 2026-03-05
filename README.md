@@ -192,10 +192,10 @@ Run Pathphynder placement directly from FASTQ (map to ref -> MAPQ filter -> remo
 ```bash
 OrganPath Pathphynder \
   --findpath \
+  --tree_data pathphynder_prepare_out/tree_data \
   --prepare-manifest pathphynder_prepare_out/pathphynder_prepare_manifest.tsv \
   -o pathphynder_findpath_out \
-  --fastq1 sample.R1.fastq.gz \
-  --fastq2 sample.R2.fastq.gz \
+  --fastq sample.fastq.gz \
   --sample-id SAMPLE1 \
   --min-mapq 20 \
   --min-baseq 20

@@ -2753,19 +2753,26 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         return 0
 
     # --findpath mode
-    if not args.prepare_manifest:
-        raise ValueError("--findpath requires --prepare-manifest from previous Pathphynder --prepare output")
-    if not args.fastq1:
-        raise ValueError("--findpath requires --fastq1 (and optionally --fastq2)")
-    manifest_path = Path(args.prepare_manifest).resolve()
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"prepare manifest not found: {manifest_path}")
-    m = read_prepare_manifest(manifest_path)
+    if not args.fastq and not args.fastq1:
+        raise ValueError("--findpath requires --fastq (single-end). --fastq1 is accepted for backward compatibility.")
+
+    manifest_path: Optional[Path] = None
+    m: Dict[str, str] = {}
+    if args.prepare_manifest:
+        manifest_path = Path(args.prepare_manifest).resolve()
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"prepare manifest not found: {manifest_path}")
+        m = read_prepare_manifest(manifest_path)
 
     tree = Path(args.tree).resolve() if args.tree else Path(m.get("tree", "")).resolve()
     ref = Path(args.ref).resolve() if args.ref else Path(m.get("ref", "")).resolve()
     snp_prefix = Path(args.snp_prefix).resolve() if args.snp_prefix else Path(m.get("snp_prefix", "")).resolve()
     prepare_prefix = Path(args.prepare_prefix).resolve() if args.prepare_prefix else Path(m.get("prepare_prefix", "")).resolve()
+    tree_data = Path(args.tree_data).resolve() if args.tree_data else None
+    if tree_data is None and manifest_path is not None:
+        candidate = manifest_path.parent / "tree_data"
+        if candidate.exists():
+            tree_data = candidate.resolve()
     if not tree.exists():
         raise FileNotFoundError(f"Tree not found: {tree}")
     if not ref.exists():
@@ -2774,11 +2781,16 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"SNP panel prefix not found (expected .bed): {snp_prefix}.bed")
     if not prepare_prefix.parent.exists():
         raise FileNotFoundError(f"Prepare prefix parent directory not found: {prepare_prefix.parent}")
+    if tree_data is None or not tree_data.exists():
+        raise FileNotFoundError(
+            "--findpath requires --tree_data (path to prepare output tree_data directory), "
+            f"or a valid --prepare-manifest with existing tree_data beside it. Got: {tree_data}"
+        )
 
-    fq1 = Path(args.fastq1).resolve()
+    fq1 = Path(args.fastq or args.fastq1).resolve()
     fq2 = Path(args.fastq2).resolve() if args.fastq2 else None
     if not fq1.exists():
-        raise FileNotFoundError(f"FASTQ1 not found: {fq1}")
+        raise FileNotFoundError(f"FASTQ not found: {fq1}")
     if fq2 and not fq2.exists():
         raise FileNotFoundError(f"FASTQ2 not found: {fq2}")
 
@@ -2843,17 +2855,20 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         str(args.min_baseq),
         "-o",
         str(out_prefix),
+        "--tree_data",
+        str(tree_data),
     ] + list(args.pathphynder_args)
     run_command(path_cmd, cwd=out_dir)
 
     find_manifest = out_dir / "pathphynder_findpath_manifest.tsv"
     with find_manifest.open("wt") as out:
         out.write("key\tvalue\n")
-        out.write(f"prepare_manifest\t{manifest_path}\n")
+        out.write(f"prepare_manifest\t{manifest_path if manifest_path else '-'}\n")
         out.write(f"tree\t{tree}\n")
         out.write(f"ref\t{ref}\n")
         out.write(f"snp_prefix\t{snp_prefix}\n")
         out.write(f"prepare_prefix\t{prepare_prefix}\n")
+        out.write(f"tree_data\t{tree_data}\n")
         out.write(f"sample_id\t{sample_id}\n")
         out.write(f"fastq1\t{fq1}\n")
         out.write(f"fastq2\t{fq2 if fq2 else '-'}\n")
@@ -3519,6 +3534,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("--prepare-manifest", help="Manifest from Pathphynder --prepare mode (required for --findpath)")
     p_pp.add_argument("--prepare-prefix", help="Override prepare_prefix from manifest (for --findpath)")
     p_pp.add_argument("--snp-prefix", help="Override snp_prefix from manifest (for --findpath)")
+    p_pp.add_argument("--tree_data", help="Path to pathPhynder prepare output tree_data directory (required for --findpath unless inferable from manifest)")
+    p_pp.add_argument("--fastq", help="Input single-end FASTQ (required for --findpath)")
     p_pp.add_argument("--fastq1", help="Input FASTQ R1 (required for --findpath)")
     p_pp.add_argument("--fastq2", help="Input FASTQ R2 (optional for --findpath)")
     p_pp.add_argument("--sample-id", help="Sample ID used for output naming in --findpath")
