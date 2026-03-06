@@ -2667,6 +2667,20 @@ def detect_pathphynder_all_arg_style(pathphynder_bin: str) -> str:
     return "legacy"
 
 
+def detect_pathphynder_supports_tree_data(pathphynder_bin: str) -> bool:
+    try:
+        p = subprocess.run(
+            [pathphynder_bin, "-h"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        help_txt = (p.stdout or "") + "\n" + (p.stderr or "")
+    except Exception:
+        return False
+    return ("--tree_data" in help_txt) or ("--tree-data" in help_txt)
+
+
 def cmd_pathphynder(args: argparse.Namespace) -> int:
     mode_count = int(args.prepare) + int(args.findpath)
     if mode_count != 1:
@@ -2895,6 +2909,11 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         io_args = ["-q", str(rescaled_bam), "-Q", str(args.min_baseq)]
     else:
         io_args = ["-b", str(rescaled_bam), "-q", str(args.min_baseq)]
+    tree_data_args: List[str] = []
+    if detect_pathphynder_supports_tree_data(pathphynder_bin):
+        tree_data_args = ["--tree_data", str(tree_data)]
+    else:
+        logger.info("pathPhynder does not support --tree_data in this version; using cwd/prefix lookup for tree_data.")
     path_cmd = [
         pathphynder_bin,
         "-s",
@@ -2910,9 +2929,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     ] + io_args + [
         "-o",
         str(out_prefix),
-        "--tree_data",
-        str(tree_data),
-    ] + list(args.pathphynder_args)
+    ] + tree_data_args + list(args.pathphynder_args)
     if not (args.resume and existing_place):
         run_command(path_cmd, cwd=panel_dir)
     else:
