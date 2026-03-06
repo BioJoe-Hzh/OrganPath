@@ -2921,6 +2921,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
 
     existing_rescaled = sorted(list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam")))
     existing_place = sorted(place_dir.glob(f"{sample_id}*"))
+    existing_place += sorted((panel_dir / "intree_folder").glob(f"{sample_id}*")) if (panel_dir / "intree_folder").exists() else []
 
     step_status = {
         "sai": sai.exists(),
@@ -2988,7 +2989,9 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     if not (args.resume and (rescaled_bam.with_suffix(rescaled_bam.suffix + ".bai").exists() or rescaled_bam.with_suffix(".bam.bai").exists())):
         run_command([samtools_bin, "index", str(rescaled_bam)])
 
+    # pathPhynder 1.2.x expects a short sample prefix for -o (not an absolute path).
     out_prefix = place_dir / sample_id
+    out_prefix_name = sample_id
     arg_style = detect_pathphynder_all_arg_style(pathphynder_bin)
     if arg_style == "modern":
         io_args = ["-q", str(rescaled_bam), "-Q", str(args.min_baseq)]
@@ -3008,7 +3011,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         str(ref),
     ] + io_args + [
         "-o",
-        str(out_prefix),
+        out_prefix_name,
     ] + list(args.pathphynder_args)
     if not (args.resume and existing_place):
         run_pathphynder_all_with_fallbacks(
@@ -3018,6 +3021,14 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
             prepare_prefix_name=prepare_prefix_name,
             cwd=panel_dir,
         )
+        # Collect pathPhynder outputs into OrganPath placement directory.
+        for src_dir in [panel_dir / "intree_folder", panel_dir]:
+            if not src_dir.exists():
+                continue
+            for fp in src_dir.glob(f"{out_prefix_name}*"):
+                dst = place_dir / fp.name
+                if fp.is_file():
+                    shutil.copy2(fp, dst)
     else:
         logger.info("Skipping pathPhynder placement because outputs for sample '%s' already exist under %s", sample_id, place_dir)
 
