@@ -27,7 +27,7 @@ DEFAULT_MIN_GQ = 30.0
 ORG_SORT_DEFAULTS = {
     "generic": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
     "plant_pt": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
-    "plant_mt": {"min_identity": 0.95, "min_len": 3000, "gap_n": 100},
+    "plant_mt": {"min_identity": 0.90, "min_len": 3000, "gap_n": 100},
     "animal_mt": {"min_identity": 0.95, "min_len": 1000, "gap_n": 100},
 }
 DEFAULT_BEAST_TEMPLATE = (
@@ -1480,7 +1480,30 @@ def resolve_cp_regions(
     return regions
 
 
-def discover_sample_candidates(sample_dir: Path) -> Tuple[List[Path], Optional[Path], str]:
+def discover_sample_candidates(sample_dir: Path, organelle_mode: str = "generic") -> Tuple[List[Path], Optional[Path], str]:
+    # Plant mitochondrial mode: force SPAdes contigs from extended_spades and ignore path_sequence/gfa routes.
+    if organelle_mode == "plant_mt":
+        contig_cands: List[Path] = []
+        for pat in (
+            "extended_spades/contigs.fasta",
+            "extended_spades/contigs.fa",
+            "extended_spades/**/final_contigs.fasta",
+            "extended_spades/**/contigs.fasta",
+            "extended_spades/**/contigs.fa",
+        ):
+            contig_cands.extend(sorted(sample_dir.glob(pat)))
+        seen_mt = set()
+        uniq_mt = []
+        for p in contig_cands:
+            sp = str(p)
+            if sp in seen_mt:
+                continue
+            seen_mt.add(sp)
+            uniq_mt.append(p)
+        fastg_cands = sorted(sample_dir.rglob("*.fastg"))
+        fastg = fastg_cands[0] if fastg_cands else None
+        return uniq_mt, fastg, "extended_spades_contigs"
+
     # Prefer GetOrganelle path sequences (best circular candidates).
     path_cands: List[Path] = []
     for pat in (
@@ -1517,6 +1540,40 @@ def discover_sample_candidates(sample_dir: Path) -> Tuple[List[Path], Optional[P
         seen.add(sp)
         uniq_contigs.append(p)
     return uniq_contigs, fastg, "contigs"
+
+
+def summarize_hit_stats(
+    hits: List[Tuple[str, int, int, str, float, int, int, int]],
+    ref_len: int,
+) -> Tuple[int, float, int]:
+    if not hits or ref_len <= 0:
+        return 0, 0.0, 0
+    weighted_ident = 0.0
+    total_aln = 0
+    intervals: List[Tuple[int, int]] = []
+    for _cid, sstart, send, _strand, ident, alen, _qstart, _qend in hits:
+        total_aln += alen
+        weighted_ident += ident * alen
+        s = max(1, min(sstart, send))
+        e = min(ref_len, max(sstart, send))
+        if e >= s:
+            intervals.append((s, e))
+    intervals.sort()
+    covered = 0
+    cur_s, cur_e = -1, -1
+    for s, e in intervals:
+        if cur_s < 0:
+            cur_s, cur_e = s, e
+            continue
+        if s <= cur_e + 1:
+            cur_e = max(cur_e, e)
+        else:
+            covered += (cur_e - cur_s + 1)
+            cur_s, cur_e = s, e
+    if cur_s >= 0:
+        covered += (cur_e - cur_s + 1)
+    mean_ident = (weighted_ident / total_aln) if total_aln > 0 else 0.0
+    return covered, mean_ident, total_aln
 
 
 def parse_blast_tab(
@@ -1949,14 +2006,14 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         try:
             part_handles = {"LSC": lsc_fh, "IR": ir_fh, "SSC": ssc_fh}
             sumf.write(
-                "sample\tstatus\tmode\tsource\tchosen_fasta\tcandidate_count\tfastg\tselected_contigs\tassembled_len\tnon_n_len\tassembled_fasta\tmessage\n"
+                "sample\tstatus\tmode\tsource\tselected_contigs\tnon_n_len\tassembled_len\tref_covered_bp\tref_covered_frac\tmean_identity\taligned_bp\tchosen_fasta\tcandidate_count\tfastg\tassembled_fasta\tmessage\n"
             )
             for sdir in sample_dirs:
                 sample = sdir.name
-                candidates, fastg, source = discover_sample_candidates(sdir)
+                candidates, fastg, source = discover_sample_candidates(sdir, organelle_mode=args.organelle_mode)
                 if not candidates:
                     sumf.write(
-                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t0\t{fastg or '-'}\t0\t0\t0\t-\tno candidate fasta found\n"
+                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t0\t0\t0\t0\t0.0000\t0.0000\t0\t-\t0\t{fastg or '-'}\t-\tno candidate fasta found\n"
                     )
                     continue
 
@@ -1972,6 +2029,16 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                         aligner=args.aligner,
                         expected_len=expected_one_ir_len,
                     )
+                    stat_hits, _ = map_hits_for_candidate(
+                        contig_fa=chosen_fa,
+                        seed_fa=seed,
+                        min_identity=min_identity,
+                        min_len=min_len,
+                        aligner=args.aligner,
+                        tmp_prefix=sample_out / f"{sample}.summary",
+                    )
+                    ref_covered_bp, mean_identity, aligned_bp = summarize_hit_stats(stat_hits, ref_len=len(seed_seq))
+                    ref_covered_frac = (ref_covered_bp / len(seed_seq)) if len(seed_seq) > 0 else 0.0
                     out_fa, nsel, alen, note, part_seqs = build_sample_assembly_from_contigs(
                         contig_fa=chosen_fa,
                         seed_fa=seed,
@@ -2018,11 +2085,11 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                             else f"filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
                         )
                     sumf.write(
-                        f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{nsel}\t{alen}\t{seq_non_n}\t{out_fa}\t{note2}\n"
+                        f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{nsel}\t{seq_non_n}\t{alen}\t{ref_covered_bp}\t{ref_covered_frac:.4f}\t{mean_identity:.4f}\t{aligned_bp}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{out_fa}\t{note2}\n"
                     )
                 except Exception as exc:
                     sumf.write(
-                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t-\t{len(candidates)}\t{fastg or '-'}\t0\t0\t0\t-\t{str(exc).replace(chr(9), ' ')}\n"
+                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t0\t0\t0\t0\t0.0000\t0.0000\t0\t-\t{len(candidates)}\t{fastg or '-'}\t-\t{str(exc).replace(chr(9), ' ')}\n"
                     )
         finally:
             for fh in (lsc_fh, ir_fh, ssc_fh):
@@ -4061,7 +4128,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["generic", "plant_pt", "plant_mt", "animal_mt"],
         help=(
             "Sorting strategy by organelle type. "
-            "Defaults: plant_pt(0.95,1000,100), plant_mt(0.95,3000,100), "
+            "Defaults: plant_pt(0.95,1000,100), plant_mt(0.90,3000,100), "
             "animal_mt(0.95,1000,100), generic(0.95,1000,100) for (identity,min_len,gap_n)"
         ),
     )
