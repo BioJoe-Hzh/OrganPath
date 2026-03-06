@@ -2710,14 +2710,27 @@ def run_pathphynder_all_with_fallbacks(
         ["-x", prepare_prefix_name, "--tree-data", str(tree_data)],
     ]
 
+    # Some pathPhynder versions expect -p as "tree_data/<prefix>" rather than plain prefix.
+    p_idx = -1
+    if "-p" in base_cmd:
+        p_idx = base_cmd.index("-p") + 1
+    prefix_values = [prepare_prefix_name, f"tree_data/{prepare_prefix_name}", str(tree_data / prepare_prefix_name)]
+
     tried: List[str] = []
-    for extra in variants:
-        cmd = base_cmd + extra
-        logger.info("Running: %s", " ".join(cmd))
-        p = subprocess.run(cmd, cwd=str(cwd), check=False)
-        if p.returncode == 0:
-            return
-        tried.append(" ".join(extra) if extra else "<no extra args>")
+    for p_val in prefix_values:
+        if p_idx <= 0:
+            cmd_base = list(base_cmd)
+        else:
+            cmd_base = list(base_cmd)
+            cmd_base[p_idx] = p_val
+        for extra in variants:
+            cmd = cmd_base + extra
+            logger.info("Running: %s", " ".join(cmd))
+            p = subprocess.run(cmd, cwd=str(cwd), check=False)
+            if p.returncode == 0:
+                return
+            suffix = " ".join(extra) if extra else "<no extra args>"
+            tried.append(f"-p {p_val} ; {suffix}")
 
     raise RuntimeError(
         "pathPhynder all failed for all known tree_data/prefix argument variants. "
