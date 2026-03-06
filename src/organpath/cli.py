@@ -2681,6 +2681,19 @@ def detect_pathphynder_supports_tree_data(pathphynder_bin: str) -> bool:
     return ("--tree_data" in help_txt) or ("--tree-data" in help_txt)
 
 
+def get_pathphynder_help_text(pathphynder_bin: str) -> str:
+    try:
+        p = subprocess.run(
+            [pathphynder_bin, "-h"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return (p.stdout or "") + "\n" + (p.stderr or "")
+    except Exception:
+        return ""
+
+
 def run_pathphynder_all_with_fallbacks(
     pathphynder_bin: str,
     base_cmd: List[str],
@@ -2692,29 +2705,44 @@ def run_pathphynder_all_with_fallbacks(
     pathPhynder CLI differs across versions. Try several argument variants for
     existing tree_data prefix until one succeeds.
     """
-    variants: List[List[str]] = [
-        [],
-        ["--tree_data", str(tree_data)],
-        ["--tree-data", str(tree_data)],
-        ["--prefix_data", prepare_prefix_name],
-        ["--prefix-data", prepare_prefix_name],
-        ["-d", prepare_prefix_name],
-        ["-D", prepare_prefix_name],
-        ["-x", prepare_prefix_name],
-        ["--tree_data", str(tree_data), "--prefix_data", prepare_prefix_name],
-        ["--tree-data", str(tree_data), "--prefix-data", prepare_prefix_name],
-        ["--tree_data", str(tree_data), "--prefix-data", prepare_prefix_name],
-        ["--tree-data", str(tree_data), "--prefix_data", prepare_prefix_name],
-        ["-d", prepare_prefix_name, "--tree_data", str(tree_data)],
-        ["-D", prepare_prefix_name, "--tree-data", str(tree_data)],
-        ["-x", prepare_prefix_name, "--tree-data", str(tree_data)],
-    ]
+    help_txt = get_pathphynder_help_text(pathphynder_bin)
+    has_tree_data_long = ("--tree_data" in help_txt) or ("--tree-data" in help_txt)
+    has_prefix_data_long = ("--prefix_data" in help_txt) or ("--prefix-data" in help_txt)
+    has_d_short = bool(re.search(r"(^|\\s)-d(\\s|,|$)", help_txt))
+    has_D_short = bool(re.search(r"(^|\\s)-D(\\s|,|$)", help_txt))
+    has_x_short = bool(re.search(r"(^|\\s)-x(\\s|,|$)", help_txt))
+
+    variants: List[List[str]] = [[]]
+    if has_tree_data_long:
+        variants += [["--tree_data", str(tree_data)], ["--tree-data", str(tree_data)]]
+    if has_prefix_data_long:
+        variants += [["--prefix_data", prepare_prefix_name], ["--prefix-data", prepare_prefix_name]]
+    if has_tree_data_long and has_prefix_data_long:
+        variants += [
+            ["--tree_data", str(tree_data), "--prefix_data", prepare_prefix_name],
+            ["--tree-data", str(tree_data), "--prefix-data", prepare_prefix_name],
+            ["--tree_data", str(tree_data), "--prefix-data", prepare_prefix_name],
+            ["--tree-data", str(tree_data), "--prefix_data", prepare_prefix_name],
+        ]
+    if has_d_short:
+        variants += [["-d", prepare_prefix_name]]
+    if has_D_short:
+        variants += [["-D", prepare_prefix_name]]
+    if has_x_short:
+        variants += [["-x", prepare_prefix_name]]
+    if has_d_short and has_tree_data_long:
+        variants += [["-d", prepare_prefix_name, "--tree_data", str(tree_data)]]
+    if has_D_short and has_tree_data_long:
+        variants += [["-D", prepare_prefix_name, "--tree-data", str(tree_data)]]
+    if has_x_short and has_tree_data_long:
+        variants += [["-x", prepare_prefix_name, "--tree-data", str(tree_data)]]
 
     # Some pathPhynder versions expect -p as "tree_data/<prefix>" rather than plain prefix.
     p_idx = -1
     if "-p" in base_cmd:
         p_idx = base_cmd.index("-p") + 1
-    prefix_values = [prepare_prefix_name, f"tree_data/{prepare_prefix_name}", str(tree_data / prepare_prefix_name)]
+    # For pathPhynder 1.2.3 and related versions, -p commonly expects tree_data/<prefix>.
+    prefix_values = [f"tree_data/{prepare_prefix_name}", str(tree_data / prepare_prefix_name), prepare_prefix_name]
 
     tried: List[str] = []
     for p_val in prefix_values:
