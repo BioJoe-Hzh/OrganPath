@@ -2681,6 +2681,44 @@ def detect_pathphynder_supports_tree_data(pathphynder_bin: str) -> bool:
     return ("--tree_data" in help_txt) or ("--tree-data" in help_txt)
 
 
+def run_pathphynder_all_with_fallbacks(
+    pathphynder_bin: str,
+    base_cmd: List[str],
+    tree_data: Path,
+    prepare_prefix_name: str,
+    cwd: Path,
+) -> None:
+    """
+    pathPhynder CLI differs across versions. Try several argument variants for
+    existing tree_data prefix until one succeeds.
+    """
+    variants: List[List[str]] = [
+        [],
+        ["--tree_data", str(tree_data)],
+        ["--tree-data", str(tree_data)],
+        ["--prefix_data", prepare_prefix_name],
+        ["--prefix-data", prepare_prefix_name],
+        ["--tree_data", str(tree_data), "--prefix_data", prepare_prefix_name],
+        ["--tree-data", str(tree_data), "--prefix-data", prepare_prefix_name],
+        ["--tree_data", str(tree_data), "--prefix-data", prepare_prefix_name],
+        ["--tree-data", str(tree_data), "--prefix_data", prepare_prefix_name],
+    ]
+
+    tried: List[str] = []
+    for extra in variants:
+        cmd = base_cmd + extra
+        logger.info("Running: %s", " ".join(cmd))
+        p = subprocess.run(cmd, cwd=str(cwd), check=False)
+        if p.returncode == 0:
+            return
+        tried.append(" ".join(extra) if extra else "<no extra args>")
+
+    raise RuntimeError(
+        "pathPhynder all failed for all known tree_data/prefix argument variants. "
+        f"Tried variants: {tried}"
+    )
+
+
 def cmd_pathphynder(args: argparse.Namespace) -> int:
     mode_count = int(args.prepare) + int(args.findpath)
     if mode_count != 1:
@@ -2909,11 +2947,6 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         io_args = ["-q", str(rescaled_bam), "-Q", str(args.min_baseq)]
     else:
         io_args = ["-b", str(rescaled_bam), "-q", str(args.min_baseq)]
-    tree_data_args: List[str] = []
-    if detect_pathphynder_supports_tree_data(pathphynder_bin):
-        tree_data_args = ["--tree_data", str(tree_data)]
-    else:
-        logger.info("pathPhynder does not support --tree_data in this version; using cwd/prefix lookup for tree_data.")
     path_cmd = [
         pathphynder_bin,
         "-s",
@@ -2929,9 +2962,15 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     ] + io_args + [
         "-o",
         str(out_prefix),
-    ] + tree_data_args + list(args.pathphynder_args)
+    ] + list(args.pathphynder_args)
     if not (args.resume and existing_place):
-        run_command(path_cmd, cwd=panel_dir)
+        run_pathphynder_all_with_fallbacks(
+            pathphynder_bin=pathphynder_bin,
+            base_cmd=path_cmd,
+            tree_data=tree_data,
+            prepare_prefix_name=prepare_prefix_name,
+            cwd=panel_dir,
+        )
     else:
         logger.info("Skipping pathPhynder placement because outputs for sample '%s' already exist under %s", sample_id, place_dir)
 
