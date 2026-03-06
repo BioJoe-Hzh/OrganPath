@@ -2950,46 +2950,6 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         bcftools_bin = ensure_tool(args.bcftools_bin)
         phynder_bin = ensure_tool(args.phynder_bin)
 
-        if args.compare_panels:
-            compare_root = out_dir / "compare_panels"
-            methods = ["norm_atomized", "biallelic_only"]
-            rows: List[Dict[str, str]] = []
-            for method in methods:
-                rows.append(
-                    run_prepare_panel_method(
-                        method=method,
-                        out_root=compare_root,
-                        prefix=prefix,
-                        input_vcf=vcf,
-                        ref=ref,
-                        tree=tree,
-                        bcftools_bin=bcftools_bin,
-                        phynder_bin=phynder_bin,
-                        pathphynder_bin=pathphynder_bin,
-                    )
-                )
-            summary = compare_root / "panel_method_comparison.tsv"
-            keys = [
-                "method",
-                "vcf_path",
-                "vcf_records",
-                "vcf_biallelic_snps",
-                "phynder_snp_path",
-                "phynder_snp_records",
-                "branch_assigned_records",
-                "ancestral_records",
-                "derived_records",
-                "sites_bed_path",
-                "sites_bed_records",
-                "prepare_prefix",
-            ]
-            with summary.open("wt") as out:
-                out.write("\t".join(keys) + "\n")
-                for r in rows:
-                    out.write("\t".join(r.get(k, "") for k in keys) + "\n")
-            logger.info("Pathphynder panel comparison completed: %s", summary)
-            return 0
-
         try:
             _hdr, vcf_samples = read_header_and_samples(vcf)
             tips = set(extract_tree_tip_names(tree.read_text()))
@@ -3203,6 +3163,12 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         "-r",
         str(ref),
     ] + io_args + [
+        "-m",
+        args.pathphynder_filtering_mode,
+        "-c",
+        str(args.pathphynder_mismatch_threshold),
+        "-t",
+        str(args.pathphynder_max_tolerance),
         "-o",
         out_prefix_name,
     ] + list(args.pathphynder_args)
@@ -3889,7 +3855,6 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p_pp.add_argument("--prepare", action="store_true", help="Run prepare mode (bcftools norm + phynder -B + pathPhynder -s prepare)")
-    p_pp.add_argument("--compare-panels", action="store_true", help="In --prepare mode, compare norm_atomized vs biallelic_only panel building and write summary TSV")
     p_pp.add_argument("--findpath", action="store_true", help="Run findpath mode (FASTQ->BAM->mapDamage rescale->pathPhynder -s all)")
     p_pp.add_argument("-v", "--vcf", help="Input VCF/VCF.GZ for panel variants (required for --prepare)")
     p_pp.add_argument("-r", "--ref", help="Reference fasta (required for --prepare and --findpath)")
@@ -3913,6 +3878,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("--samtools-bin", default="samtools", help="samtools executable name/path (for --findpath)")
     p_pp.add_argument("--mapdamage-bin", default="mapDamage", help="mapDamage executable name/path (for --findpath)")
     p_pp.add_argument("--mapdamage-args", nargs="*", default=[], help="Extra args passed to mapDamage in --findpath")
+    p_pp.add_argument(
+        "--pathphynder-filtering-mode",
+        default="no-filter",
+        choices=["default", "no-filter", "transversions"],
+        help="Filtering mode passed to pathPhynder -m in --findpath",
+    )
+    p_pp.add_argument(
+        "--pathphynder-mismatch-threshold",
+        type=float,
+        default=0.5,
+        help="Mismatch threshold passed to pathPhynder -c in --findpath",
+    )
+    p_pp.add_argument(
+        "--pathphynder-max-tolerance",
+        type=int,
+        default=9999,
+        help="Maximum tolerance passed to pathPhynder -t in --findpath",
+    )
     p_pp.add_argument("--pathphynder-args", nargs="*", default=[], help="Extra args appended to pathPhynder in --findpath")
     p_pp.set_defaults(func=cmd_pathphynder)
 

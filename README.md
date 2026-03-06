@@ -187,23 +187,6 @@ This runs:
 - `pathPhynder -s prepare` to build prepare files
 - writes `pathphynder_prepare_manifest.tsv` for downstream usage
 
-Compare two panel-building methods in one run (`norm_atomized` vs `biallelic_only` without norm/atomize):
-
-```bash
-OrganPath Pathphynder \
-  --prepare \
-  --compare-panels \
-  -v input.vcf.gz \
-  -r ref.fa \
-  -t tree.nwk \
-  -o pathphynder_prepare_out \
-  --prefix panel_name
-```
-
-This writes:
-- `pathphynder_prepare_out/compare_panels/panel_method_comparison.tsv`
-- per-method outputs under `compare_panels/norm_atomized/` and `compare_panels/biallelic_only/`
-
 Run Pathphynder placement directly from FASTQ (map to ref -> MAPQ filter -> remove duplicates -> mapDamage rescale -> `pathPhynder -s all`):
 
 ```bash
@@ -218,7 +201,10 @@ OrganPath Pathphynder \
   --bwa-aln-seedlen 1024 \
   --bwa-aln-mismatch 0.01 \
   --min-mapq 20 \
-  --min-baseq 20
+  --min-baseq 20 \
+  --pathphynder-filtering-mode no-filter \
+  --pathphynder-mismatch-threshold 0.5 \
+  --pathphynder-max-tolerance 9999
 ```
 
 To only check existing intermediates (without rerunning):
