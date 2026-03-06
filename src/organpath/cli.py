@@ -1519,32 +1519,6 @@ def discover_sample_candidates(sample_dir: Path) -> Tuple[List[Path], Optional[P
     return uniq_contigs, fastg, "contigs"
 
 
-def parse_minimap2_paf(
-    paf_path: Path, min_identity: float, min_len: int
-) -> List[Tuple[str, int, int, str, float, int, int, int]]:
-    hits: List[Tuple[str, int, int, str, float, int, int, int]] = []
-    with paf_path.open("rt") as fh:
-        for raw in fh:
-            parts = raw.rstrip("\n").split("\t")
-            if len(parts) < 12:
-                continue
-            qname = parts[0]
-            qstart = int(parts[2])
-            qend = int(parts[3])
-            strand = parts[4]
-            tstart = int(parts[7])
-            tend = int(parts[8])
-            nmatch = int(parts[9])
-            alen = int(parts[10])
-            if alen <= 0:
-                continue
-            ident = nmatch / alen
-            if ident < min_identity or alen < min_len:
-                continue
-            hits.append((qname, tstart, tend, strand, ident, alen, qstart, qend))
-    return hits
-
-
 def parse_blast_tab(
     tab_path: Path, min_identity: float, min_len: int
 ) -> List[Tuple[str, int, int, str, float, int, int, int]]:
@@ -1595,20 +1569,10 @@ def map_hits_for_candidate(
 ) -> Tuple[List[Tuple[str, int, int, str, float, int, int, int]], str]:
     tool = aligner
     if tool == "auto":
-        tool = "blastn" if shutil.which("blastn") else "minimap2"
+        tool = "blastn"
 
     tmp = tmp_prefix.with_suffix(".align.tmp")
-    if tool == "minimap2":
-        if not shutil.which("minimap2"):
-            raise RuntimeError("minimap2 not found in PATH.")
-        with tmp.open("wt") as out:
-            subprocess.run(
-                ["minimap2", "-x", "asm5", str(seed_fa), str(contig_fa)],
-                stdout=out,
-                check=True,
-            )
-        hits = parse_minimap2_paf(tmp, min_identity=min_identity, min_len=min_len)
-    elif tool == "blastn":
+    if tool == "blastn":
         if not shutil.which("blastn"):
             raise RuntimeError("blastn not found in PATH.")
         with tmp.open("wt") as out:
@@ -1627,7 +1591,7 @@ def map_hits_for_candidate(
             )
         hits = parse_blast_tab(tmp, min_identity=min_identity, min_len=min_len)
     else:
-        raise ValueError(f"Unsupported aligner: {aligner}")
+        raise ValueError(f"Unsupported aligner: {aligner}. Allowed: auto, blastn")
     try:
         tmp.unlink(missing_ok=True)
     except Exception:
@@ -1753,6 +1717,11 @@ def build_sample_assembly_from_contigs(
     # Keep only the best-scoring path to avoid concatenating alternative assemblies.
     if "path_sequence" in contig_fa.name.lower() and len(chosen) > 1:
         chosen = [max(chosen, key=lambda x: (x[5], x[4]))]
+    # For plant mitochondrial genomes, avoid seed-coordinate breakpoint assumptions.
+    # Keep contigs in original FASTA order and only use blast hits for orientation/filtering.
+    if organelle_mode == "plant_mt" and len(chosen) > 1:
+        order = {cid: i for i, cid in enumerate(contigs.keys())}
+        chosen.sort(key=lambda x: order.get(x[0], 10**9))
     if not chosen:
         raise ValueError("No contigs passed identity/length filter against seed.")
 
@@ -1887,9 +1856,7 @@ def build_sample_assembly_from_contigs(
             if contig_id not in contigs:
                 continue
             cseq = contigs[contig_id]
-            if tool == "minimap2":
-                cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=False)
-            else:
+            if organelle_mode != "plant_mt":
                 cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
             if strand == "-":
                 cseq = reverse_complement(cseq)
@@ -1899,6 +1866,8 @@ def build_sample_assembly_from_contigs(
 
     merged = n_gap.join(seq_parts)
     note = "-"
+    if organelle_mode == "plant_mt":
+        note = "orientation_only:no_seed_reorder"
     if organelle_mode in {"plant_pt", "animal_mt"} and seed_seq:
         merged, orient = rotate_sequence_to_seed_start(merged, seed_seq=seed_seq)
         note = f"rotated:{orient}"
@@ -4083,7 +4052,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument(
         "--aligner",
         default="auto",
-        choices=["auto", "minimap2", "blastn"],
+        choices=["auto", "blastn"],
         help="Aligner for contig-to-seed mapping",
     )
     p_sort.add_argument(
@@ -4255,7 +4224,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--max-reads", type=int, default=0, help="GetOrganelle -n max reads")
     p_ch_pt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_pt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
-    p_ch_pt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
+    p_ch_pt.add_argument("--aligner", default="auto", choices=["auto", "blastn"], help="Contig aligner")
     p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection (default: 1000)")
     p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
@@ -4290,7 +4259,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--max-reads", type=int, default=0, help="GetOrganelle -n max reads")
     p_ch_mt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_mt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
-    p_ch_mt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
+    p_ch_mt.add_argument("--aligner", default="auto", choices=["auto", "blastn"], help="Contig aligner")
     p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection (default: 3000)")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
@@ -4342,7 +4311,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_amt.add_argument("--max-reads", type=int, default=0, help="GetOrganelle -n max reads")
     p_ch_amt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_amt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
-    p_ch_amt.add_argument("--aligner", default="auto", choices=["auto", "minimap2", "blastn"], help="Contig aligner")
+    p_ch_amt.add_argument("--aligner", default="auto", choices=["auto", "blastn"], help="Contig aligner")
     p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_amt.add_argument("--min-len-mt", type=int, default=1000, help="Minimum length for mt contig selection (default: 1000)")
     p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
