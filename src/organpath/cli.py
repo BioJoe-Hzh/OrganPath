@@ -1756,6 +1756,7 @@ def build_sample_assembly_from_contigs(
     pt_complete_min_frac: float = 0.85,
     seed_len: int = 0,
     seed_parts: Optional[Dict[str, str]] = None,
+    orient_min_query_cov: float = 0.6,
 ) -> Tuple[str, int, int, str, Optional[Dict[str, str]]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
@@ -1867,7 +1868,8 @@ def build_sample_assembly_from_contigs(
                         continue
                     # Keep only mapped query segment to reduce non-organelle flanking sequence.
                     cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
-                    if strand == "-":
+                    qcov = (abs(qend - qstart) + 1) / max(len(contigs.get(cid, "")), 1)
+                    if strand == "-" and qcov >= orient_min_query_cov:
                         cseq = reverse_complement(cseq)
                     region_seq_parts.append(cseq)
                     covered += max(send - sstart + 1, 0)
@@ -1915,7 +1917,8 @@ def build_sample_assembly_from_contigs(
             cseq = contigs[contig_id]
             if organelle_mode != "plant_mt":
                 cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
-            if strand == "-":
+            qcov = (abs(qend - qstart) + 1) / max(len(contigs[contig_id]), 1)
+            if strand == "-" and qcov >= orient_min_query_cov:
                 cseq = reverse_complement(cseq)
             seq_parts.append(cseq)
             tab.write(f"{contig_id}\t{sstart}\t{send}\t{strand}\t{ident:.4f}\t{alen}\n")
@@ -1945,6 +1948,8 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"input-dir not found: {in_dir}")
     if not seed.exists():
         raise FileNotFoundError(f"seed fasta not found: {seed}")
+    if not (0.0 <= args.orient_min_query_cov <= 1.0):
+        raise ValueError("--orient-min-query-cov must be within [0,1]")
     out_dir.mkdir(parents=True, exist_ok=True)
     seed_seq = read_primary_fasta_sequence(seed)
     prof = ORG_SORT_DEFAULTS.get(args.organelle_mode, ORG_SORT_DEFAULTS["generic"])
@@ -2058,6 +2063,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                         pt_complete_min_frac=args.pt_complete_min_frac,
                         seed_len=len(seed_seq),
                         seed_parts=seed_parts,
+                        orient_min_query_cov=args.orient_min_query_cov,
                     )
                     seqs = read_fasta_sequences(Path(out_fa))
                     seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
@@ -2379,6 +2385,7 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_pt,
         gap_n=args.gap_n,
+        orient_min_query_cov=args.orient_min_query_cov,
         min_non_n_len=args.min_non_n_len,
     )
     return cmd_sort_organ(ss)
@@ -2418,6 +2425,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
+        orient_min_query_cov=args.orient_min_query_cov,
         min_non_n_len=args.min_non_n_len,
     )
     cmd_sort_organ(ss)
@@ -2487,6 +2495,7 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
+        orient_min_query_cov=args.orient_min_query_cov,
         min_non_n_len=args.min_non_n_len,
     )
     cmd_sort_organ(ss)
@@ -4158,6 +4167,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument("--min-len", type=int, default=None, help="Minimum aligned length (default by --organelle-mode)")
     p_sort.add_argument("--gap-n", type=int, default=None, help="Number of Ns between selected contigs (default by --organelle-mode)")
     p_sort.add_argument(
+        "--orient-min-query-cov",
+        type=float,
+        default=0.6,
+        help="Minimum query coverage fraction of blast hit required to apply reverse-complement orientation",
+    )
+    p_sort.add_argument(
         "--min-non-n-len",
         type=int,
         default=0,
@@ -4295,6 +4310,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection (default: 1000)")
     p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_pt.add_argument("--orient-min-query-cov", type=float, default=0.6, help="Minimum blast query coverage to apply reverse-complement orientation")
     p_ch_pt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_pt.add_argument(
         "--pt-single-ir",
@@ -4312,7 +4328,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ch_mt = subs.add_parser(
         "plant_mt",
-        help="Channel: plant mitochondria (default profile: identity=0.95, min_len=3000, gap_n=100)",
+        help="Channel: plant mitochondria (default profile: identity=0.90, min_len=3000, gap_n=100)",
     )
     p_ch_mt.add_argument("-i", "--reads-dir", required=True, help="Folder containing paired reads")
     p_ch_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
@@ -4327,9 +4343,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--getorganelle-bin", default="get_organelle_from_reads.py", help="GetOrganelle executable")
     p_ch_mt.add_argument("--getorgan-extra-args", nargs="*", default=[], help="Extra args for GetOrganelle")
     p_ch_mt.add_argument("--aligner", default="auto", choices=["auto", "blastn"], help="Contig aligner")
-    p_ch_mt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
+    p_ch_mt.add_argument("--min-identity", type=float, default=0.90, help="Minimum identity for contig selection (default: 0.90)")
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection (default: 3000)")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_mt.add_argument("--orient-min-query-cov", type=float, default=0.6, help="Minimum blast query coverage to apply reverse-complement orientation")
     p_ch_mt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
@@ -4382,6 +4399,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_amt.add_argument("--min-len-mt", type=int, default=1000, help="Minimum length for mt contig selection (default: 1000)")
     p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_amt.add_argument("--orient-min-query-cov", type=float, default=0.6, help="Minimum blast query coverage to apply reverse-complement orientation")
     p_ch_amt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_amt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_amt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
