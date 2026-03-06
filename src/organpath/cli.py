@@ -2681,6 +2681,159 @@ def detect_pathphynder_supports_tree_data(pathphynder_bin: str) -> bool:
     return ("--tree_data" in help_txt) or ("--tree-data" in help_txt)
 
 
+def count_vcf_records(vcf_path: Path) -> int:
+    n = 0
+    with open_maybe_gzip(vcf_path, "rt") as fh:
+        for raw in fh:
+            if raw.startswith("#"):
+                continue
+            n += 1
+    return n
+
+
+def count_vcf_biallelic_snp_records(vcf_path: Path) -> int:
+    n = 0
+    with open_maybe_gzip(vcf_path, "rt") as fh:
+        for raw in fh:
+            if raw.startswith("#"):
+                continue
+            a = raw.rstrip("\n").split("\t")
+            if len(a) < 5:
+                continue
+            ref = a[3]
+            alt = a[4]
+            if "," in alt:
+                continue
+            if len(ref) == 1 and len(alt) == 1 and ref != "." and alt != ".":
+                n += 1
+    return n
+
+
+def summarize_phynder_snp_file(snp_path: Path) -> Dict[str, int]:
+    stats = {
+        "phynder_snp_records": 0,
+        "branch_assigned_records": 0,
+        "ancestral_records": 0,
+        "derived_records": 0,
+    }
+    if not snp_path.exists():
+        return stats
+
+    header: Optional[List[str]] = None
+    with snp_path.open("rt") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if header is None and any(c.isalpha() for c in line):
+                low = [c.lower() for c in cols]
+                if any(x in low for x in ["branch", "edge", "node", "ancestral", "derived", "anc", "der"]):
+                    header = low
+                    continue
+            stats["phynder_snp_records"] += 1
+            if header:
+                idx_branch = next((i for i, c in enumerate(header) if c in {"branch", "edge", "node", "branch_id", "edge_id"}), -1)
+                idx_anc = next((i for i, c in enumerate(header) if c in {"ancestral", "anc", "is_ancestral"}), -1)
+                idx_der = next((i for i, c in enumerate(header) if c in {"derived", "der", "is_derived"}), -1)
+                if idx_branch >= 0 and idx_branch < len(cols):
+                    v = cols[idx_branch].strip().lower()
+                    if v not in {"", ".", "na", "nan", "none"}:
+                        stats["branch_assigned_records"] += 1
+                if idx_anc >= 0 and idx_anc < len(cols):
+                    v = cols[idx_anc].strip().lower()
+                    if v not in {"", ".", "na", "nan", "none", "0", "false"}:
+                        stats["ancestral_records"] += 1
+                if idx_der >= 0 and idx_der < len(cols):
+                    v = cols[idx_der].strip().lower()
+                    if v not in {"", ".", "na", "nan", "none", "0", "false"}:
+                        stats["derived_records"] += 1
+            else:
+                low_fields = [c.strip().lower() for c in cols]
+                if any(v in {"anc", "ancestral"} for v in low_fields):
+                    stats["ancestral_records"] += 1
+                if any(v in {"der", "derived"} for v in low_fields):
+                    stats["derived_records"] += 1
+    return stats
+
+
+def run_prepare_panel_method(
+    *,
+    method: str,
+    out_root: Path,
+    prefix: str,
+    input_vcf: Path,
+    ref: Path,
+    tree: Path,
+    bcftools_bin: str,
+    phynder_bin: str,
+    pathphynder_bin: str,
+) -> Dict[str, str]:
+    method_dir = out_root / method
+    method_dir.mkdir(parents=True, exist_ok=True)
+    out_vcf = method_dir / f"{prefix}.{method}.vcf"
+    if method == "norm_atomized":
+        run_command(
+            [
+                bcftools_bin,
+                "norm",
+                "-m",
+                "-any",
+                "-a",
+                "-f",
+                str(ref),
+                str(input_vcf),
+                "-Ov",
+                "-o",
+                str(out_vcf),
+            ]
+        )
+    elif method == "biallelic_only":
+        run_command(
+            [
+                bcftools_bin,
+                "view",
+                "-m2",
+                "-M2",
+                "-v",
+                "snps",
+                str(input_vcf),
+                "-Ov",
+                "-o",
+                str(out_vcf),
+            ]
+        )
+    else:
+        raise ValueError(f"Unknown panel compare method: {method}")
+
+    method_prefix = f"{prefix}.{method}"
+    snp_prefix = method_dir / f"{method_prefix}.snp"
+    run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(out_vcf)])
+    run_command(
+        [pathphynder_bin, "-s", "prepare", "-i", str(tree), "-p", method_prefix, "-f", str(snp_prefix)],
+        cwd=method_dir,
+    )
+
+    stats = summarize_phynder_snp_file(snp_prefix)
+    sites_bed = method_dir / "tree_data" / f"{method_prefix}.sites.bed"
+    return {
+        "method": method,
+        "vcf_path": str(out_vcf),
+        "vcf_records": str(count_vcf_records(out_vcf)),
+        "vcf_biallelic_snps": str(count_vcf_biallelic_snp_records(out_vcf)),
+        "phynder_snp_path": str(snp_prefix),
+        "phynder_snp_records": str(stats["phynder_snp_records"]),
+        "branch_assigned_records": str(stats["branch_assigned_records"]),
+        "ancestral_records": str(stats["ancestral_records"]),
+        "derived_records": str(stats["derived_records"]),
+        "sites_bed_path": str(sites_bed),
+        "sites_bed_records": str(count_vcf_records(sites_bed) if sites_bed.exists() else 0),
+        "prepare_prefix": str(method_dir / method_prefix),
+    }
+
+
 def get_pathphynder_help_text(pathphynder_bin: str) -> str:
     try:
         p = subprocess.run(
@@ -2796,6 +2949,46 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
 
         bcftools_bin = ensure_tool(args.bcftools_bin)
         phynder_bin = ensure_tool(args.phynder_bin)
+
+        if args.compare_panels:
+            compare_root = out_dir / "compare_panels"
+            methods = ["norm_atomized", "biallelic_only"]
+            rows: List[Dict[str, str]] = []
+            for method in methods:
+                rows.append(
+                    run_prepare_panel_method(
+                        method=method,
+                        out_root=compare_root,
+                        prefix=prefix,
+                        input_vcf=vcf,
+                        ref=ref,
+                        tree=tree,
+                        bcftools_bin=bcftools_bin,
+                        phynder_bin=phynder_bin,
+                        pathphynder_bin=pathphynder_bin,
+                    )
+                )
+            summary = compare_root / "panel_method_comparison.tsv"
+            keys = [
+                "method",
+                "vcf_path",
+                "vcf_records",
+                "vcf_biallelic_snps",
+                "phynder_snp_path",
+                "phynder_snp_records",
+                "branch_assigned_records",
+                "ancestral_records",
+                "derived_records",
+                "sites_bed_path",
+                "sites_bed_records",
+                "prepare_prefix",
+            ]
+            with summary.open("wt") as out:
+                out.write("\t".join(keys) + "\n")
+                for r in rows:
+                    out.write("\t".join(r.get(k, "") for k in keys) + "\n")
+            logger.info("Pathphynder panel comparison completed: %s", summary)
+            return 0
 
         try:
             _hdr, vcf_samples = read_header_and_samples(vcf)
@@ -3696,6 +3889,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p_pp.add_argument("--prepare", action="store_true", help="Run prepare mode (bcftools norm + phynder -B + pathPhynder -s prepare)")
+    p_pp.add_argument("--compare-panels", action="store_true", help="In --prepare mode, compare norm_atomized vs biallelic_only panel building and write summary TSV")
     p_pp.add_argument("--findpath", action="store_true", help="Run findpath mode (FASTQ->BAM->mapDamage rescale->pathPhynder -s all)")
     p_pp.add_argument("-v", "--vcf", help="Input VCF/VCF.GZ for panel variants (required for --prepare)")
     p_pp.add_argument("-r", "--ref", help="Reference fasta (required for --prepare and --findpath)")
