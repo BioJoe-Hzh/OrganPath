@@ -2020,6 +2020,144 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             "SSC": pdir / "SSC_samples.fasta",
         }
 
+    def _process_one_sample(sdir: Path) -> Dict[str, object]:
+        sample = sdir.name
+        sample_out = out_dir / sample
+        sample_out.mkdir(parents=True, exist_ok=True)
+        proc_log = sample_out / "process.log"
+        proc_lines: List[str] = []
+        candidates, fastg, source = discover_sample_candidates(sdir, organelle_mode=args.organelle_mode)
+        proc_lines.append(f"sample\t{sample}")
+        proc_lines.append(f"source\t{source}")
+        proc_lines.append(f"candidate_count\t{len(candidates)}")
+        for i, c in enumerate(candidates[:20], start=1):
+            proc_lines.append(f"candidate_{i}\t{c}")
+        if len(candidates) > 20:
+            proc_lines.append(f"candidate_more\t{len(candidates)-20}")
+        proc_lines.append(f"fastg\t{fastg or '-'}")
+
+        result: Dict[str, object] = {
+            "sample": sample,
+            "status": "FAIL",
+            "mode": args.organelle_mode,
+            "source": source,
+            "selected_contigs": 0,
+            "non_n_len": 0,
+            "assembled_len": 0,
+            "ref_covered_bp": 0,
+            "ref_covered_frac": 0.0,
+            "mean_identity": 0.0,
+            "aligned_bp": 0,
+            "chosen_fasta": "-",
+            "candidate_count": len(candidates),
+            "fastg": str(fastg) if fastg else "-",
+            "assembled_fasta": "-",
+            "message": "no candidate fasta found",
+            "accepted": False,
+            "seqs": {},
+            "part_seqs": None,
+            "process_log": str(proc_log),
+        }
+
+        if not candidates:
+            proc_lines.append("status\tFAIL")
+            proc_lines.append("message\tno candidate fasta found")
+            proc_log.write_text("\n".join(proc_lines) + "\n")
+            return result
+
+        try:
+            chosen_fa, cand_n = select_best_candidate_fasta(
+                candidates=candidates,
+                seed_fa=seed,
+                sample_name=sample,
+                sample_out=sample_out,
+                min_identity=min_identity,
+                min_len=min_len,
+                aligner=args.aligner,
+                expected_len=expected_one_ir_len,
+            )
+            stat_hits, _ = map_hits_for_candidate(
+                contig_fa=chosen_fa,
+                seed_fa=seed,
+                min_identity=min_identity,
+                min_len=min_len,
+                aligner=args.aligner,
+                tmp_prefix=sample_out / f"{sample}.summary",
+            )
+            ref_covered_bp, mean_identity, aligned_bp = summarize_hit_stats(stat_hits, ref_len=len(seed_seq))
+            ref_covered_frac = (ref_covered_bp / len(seed_seq)) if len(seed_seq) > 0 else 0.0
+            out_fa, nsel, alen, note, part_seqs = build_sample_assembly_from_contigs(
+                contig_fa=chosen_fa,
+                seed_fa=seed,
+                sample_name=sample,
+                out_dir=sample_out,
+                min_identity=min_identity,
+                min_len=min_len,
+                gap_n=gap_n,
+                aligner=args.aligner,
+                organelle_mode=args.organelle_mode,
+                seed_seq=seed_seq,
+                pt_single_ir=args.pt_single_ir,
+                cp_regions=cp_regions,
+                pt_keep_ir=args.pt_keep_ir,
+                cpstools_bin=args.cpstools_bin,
+                pt_fragment_min_len=args.pt_fragment_min_len,
+                pt_complete_min_frac=args.pt_complete_min_frac,
+                seed_len=len(seed_seq),
+                seed_parts=seed_parts,
+                orient_min_query_cov=args.orient_min_query_cov,
+            )
+            seqs = read_fasta_sequences(Path(out_fa))
+            seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
+            accepted = seq_non_n >= args.min_non_n_len
+            status = "OK" if accepted else "FILTERED"
+            note2 = note if accepted else (
+                f"{note};filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+                if note != "-"
+                else f"filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
+            )
+
+            result.update(
+                {
+                    "status": status,
+                    "selected_contigs": nsel,
+                    "non_n_len": seq_non_n,
+                    "assembled_len": alen,
+                    "ref_covered_bp": ref_covered_bp,
+                    "ref_covered_frac": ref_covered_frac,
+                    "mean_identity": mean_identity,
+                    "aligned_bp": aligned_bp,
+                    "chosen_fasta": str(chosen_fa),
+                    "candidate_count": cand_n,
+                    "assembled_fasta": str(out_fa),
+                    "message": note2,
+                    "accepted": accepted,
+                    "seqs": seqs if accepted else {},
+                    "part_seqs": part_seqs if accepted else None,
+                }
+            )
+
+            proc_lines.extend(
+                [
+                    f"chosen_fasta\t{chosen_fa}",
+                    f"selected_contigs\t{nsel}",
+                    f"assembled_len\t{alen}",
+                    f"non_n_len\t{seq_non_n}",
+                    f"ref_covered_bp\t{ref_covered_bp}",
+                    f"ref_covered_frac\t{ref_covered_frac:.6f}",
+                    f"mean_identity\t{mean_identity:.6f}",
+                    f"aligned_bp\t{aligned_bp}",
+                    f"status\t{status}",
+                    f"message\t{note2}",
+                ]
+            )
+        except Exception as exc:
+            result["message"] = str(exc).replace(chr(9), " ")
+            proc_lines.append("status\tFAIL")
+            proc_lines.append(f"message\t{result['message']}")
+        proc_log.write_text("\n".join(proc_lines) + "\n")
+        return result
+
     with summary.open("wt") as sumf, all_multi.open("wt") as mf:
         lsc_fh = part_files.get("LSC").open("wt") if "LSC" in part_files else None
         ir_fh = part_files.get("IR").open("wt") if "IR" in part_files else None
@@ -2029,90 +2167,48 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             sumf.write(
                 "sample\tstatus\tmode\tsource\tselected_contigs\tnon_n_len\tassembled_len\tref_covered_bp\tref_covered_frac\tmean_identity\taligned_bp\tchosen_fasta\tcandidate_count\tfastg\tassembled_fasta\tmessage\n"
             )
-            for sdir in sample_dirs:
-                sample = sdir.name
-                candidates, fastg, source = discover_sample_candidates(sdir, organelle_mode=args.organelle_mode)
-                if not candidates:
-                    sumf.write(
-                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t0\t0\t0\t0\t0.0000\t0.0000\t0\t-\t0\t{fastg or '-'}\t-\tno candidate fasta found\n"
-                    )
-                    continue
-
-                sample_out = out_dir / sample
-                try:
-                    chosen_fa, cand_n = select_best_candidate_fasta(
-                        candidates=candidates,
-                        seed_fa=seed,
-                        sample_name=sample,
-                        sample_out=sample_out,
-                        min_identity=min_identity,
-                        min_len=min_len,
-                        aligner=args.aligner,
-                        expected_len=expected_one_ir_len,
-                    )
-                    stat_hits, _ = map_hits_for_candidate(
-                        contig_fa=chosen_fa,
-                        seed_fa=seed,
-                        min_identity=min_identity,
-                        min_len=min_len,
-                        aligner=args.aligner,
-                        tmp_prefix=sample_out / f"{sample}.summary",
-                    )
-                    ref_covered_bp, mean_identity, aligned_bp = summarize_hit_stats(stat_hits, ref_len=len(seed_seq))
-                    ref_covered_frac = (ref_covered_bp / len(seed_seq)) if len(seed_seq) > 0 else 0.0
-                    out_fa, nsel, alen, note, part_seqs = build_sample_assembly_from_contigs(
-                        contig_fa=chosen_fa,
-                        seed_fa=seed,
-                        sample_name=sample,
-                        out_dir=sample_out,
-                        min_identity=min_identity,
-                        min_len=min_len,
-                        gap_n=gap_n,
-                        aligner=args.aligner,
-                        organelle_mode=args.organelle_mode,
-                        seed_seq=seed_seq,
-                        pt_single_ir=args.pt_single_ir,
-                        cp_regions=cp_regions,
-                        pt_keep_ir=args.pt_keep_ir,
-                        cpstools_bin=args.cpstools_bin,
-                        pt_fragment_min_len=args.pt_fragment_min_len,
-                        pt_complete_min_frac=args.pt_complete_min_frac,
-                        seed_len=len(seed_seq),
-                        seed_parts=seed_parts,
-                        orient_min_query_cov=args.orient_min_query_cov,
-                    )
-                    seqs = read_fasta_sequences(Path(out_fa))
-                    seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
-                    if seq_non_n >= args.min_non_n_len:
-                        for sid, seq in seqs.items():
-                            mf.write(f">{sid}\n{seq}\n")
-                        if part_seqs:
-                            for pname in ("LSC", "IR", "SSC"):
-                                pseq = part_seqs.get(pname, "")
-                                if pseq:
-                                    with (sample_out / f"{sample}.{pname}.fasta").open("wt") as p_out:
-                                        p_out.write(f">{sample}\n{pseq}\n")
-                            for pname in ("LSC", "IR", "SSC"):
-                                fh = part_handles.get(pname)
-                                pseq = part_seqs.get(pname, "")
-                                if fh and pseq:
-                                    fh.write(f">{sample}\n{pseq}\n")
-                        status = "OK"
-                        note2 = note
-                    else:
-                        status = "FILTERED"
-                        note2 = (
-                            f"{note};filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
-                            if note != "-"
-                            else f"filtered:min_non_n_len<{args.min_non_n_len};non_n_len:{seq_non_n}"
-                        )
-                    sumf.write(
-                        f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{nsel}\t{seq_non_n}\t{alen}\t{ref_covered_bp}\t{ref_covered_frac:.4f}\t{mean_identity:.4f}\t{aligned_bp}\t{chosen_fa}\t{cand_n}\t{fastg or '-'}\t{out_fa}\t{note2}\n"
-                    )
-                except Exception as exc:
-                    sumf.write(
-                        f"{sample}\tFAIL\t{args.organelle_mode}\t{source}\t0\t0\t0\t0\t0.0000\t0.0000\t0\t-\t{len(candidates)}\t{fastg or '-'}\t-\t{str(exc).replace(chr(9), ' ')}\n"
-                    )
+            workers = max(1, int(getattr(args, "jobs", 1)))
+            if workers == 1:
+                results = [_process_one_sample(sdir) for sdir in sample_dirs]
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                    results = list(ex.map(_process_one_sample, sample_dirs))
+            for rec in sorted(results, key=lambda x: str(x["sample"])):
+                sample = str(rec["sample"])
+                status = str(rec["status"])
+                source = str(rec["source"])
+                nsel = int(rec["selected_contigs"])
+                seq_non_n = int(rec["non_n_len"])
+                alen = int(rec["assembled_len"])
+                ref_covered_bp = int(rec["ref_covered_bp"])
+                ref_covered_frac = float(rec["ref_covered_frac"])
+                mean_identity = float(rec["mean_identity"])
+                aligned_bp = int(rec["aligned_bp"])
+                chosen_fa = str(rec["chosen_fasta"])
+                cand_n = int(rec["candidate_count"])
+                fastg = str(rec["fastg"])
+                out_fa = str(rec["assembled_fasta"])
+                note2 = str(rec["message"])
+                if bool(rec.get("accepted", False)):
+                    seqs = rec.get("seqs", {}) or {}
+                    for sid, seq in seqs.items():
+                        mf.write(f">{sid}\n{seq}\n")
+                    part_seqs = rec.get("part_seqs")
+                    if part_seqs:
+                        sample_out = out_dir / sample
+                        for pname in ("LSC", "IR", "SSC"):
+                            pseq = part_seqs.get(pname, "")
+                            if pseq:
+                                with (sample_out / f"{sample}.{pname}.fasta").open("wt") as p_out:
+                                    p_out.write(f">{sample}\n{pseq}\n")
+                        for pname in ("LSC", "IR", "SSC"):
+                            fh = part_handles.get(pname)
+                            pseq = part_seqs.get(pname, "")
+                            if fh and pseq:
+                                fh.write(f">{sample}\n{pseq}\n")
+                sumf.write(
+                    f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{nsel}\t{seq_non_n}\t{alen}\t{ref_covered_bp}\t{ref_covered_frac:.4f}\t{mean_identity:.4f}\t{aligned_bp}\t{chosen_fa}\t{cand_n}\t{fastg}\t{out_fa}\t{note2}\n"
+                )
         finally:
             for fh in (lsc_fh, ir_fh, ssc_fh):
                 if fh:
@@ -4194,6 +4290,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Minimum non-N length required to keep sample in assembled_samples.fasta (default: 0)",
     )
+    p_sort.add_argument("--jobs", type=int, default=1, help="Parallel sample jobs for sortOrgan")
     p_sort.set_defaults(func=cmd_sort_organ)
 
     p_pan = subs.add_parser(
