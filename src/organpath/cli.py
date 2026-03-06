@@ -2698,10 +2698,16 @@ def run_pathphynder_all_with_fallbacks(
         ["--tree-data", str(tree_data)],
         ["--prefix_data", prepare_prefix_name],
         ["--prefix-data", prepare_prefix_name],
+        ["-d", prepare_prefix_name],
+        ["-D", prepare_prefix_name],
+        ["-x", prepare_prefix_name],
         ["--tree_data", str(tree_data), "--prefix_data", prepare_prefix_name],
         ["--tree-data", str(tree_data), "--prefix-data", prepare_prefix_name],
         ["--tree_data", str(tree_data), "--prefix-data", prepare_prefix_name],
         ["--tree-data", str(tree_data), "--prefix_data", prepare_prefix_name],
+        ["-d", prepare_prefix_name, "--tree_data", str(tree_data)],
+        ["-D", prepare_prefix_name, "--tree-data", str(tree_data)],
+        ["-x", prepare_prefix_name, "--tree-data", str(tree_data)],
     ]
 
     tried: List[str] = []
