@@ -2820,35 +2820,64 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     coord_bam = align_dir / f"{sample_id}.coordsort.bam"
     dedup_bam = align_dir / f"{sample_id}.q{args.min_mapq}.rmdup.bam"
 
+    existing_rescaled = sorted(list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam")))
+    existing_place = sorted(place_dir.glob(f"{sample_id}*"))
+
+    step_status = {
+        "sai": sai.exists(),
+        "sam": sam.exists(),
+        "mapped_bam": mapped_bam.exists(),
+        "name_sorted_bam": name_sorted_bam.exists(),
+        "fixmate_bam": fixmate_bam.exists(),
+        "coord_bam": coord_bam.exists(),
+        "dedup_bam": dedup_bam.exists(),
+        "dedup_bai": dedup_bam.with_suffix(dedup_bam.suffix + ".bai").exists() or dedup_bam.with_suffix(".bam.bai").exists(),
+        "rescaled_bam": bool(existing_rescaled),
+        "placement_any": bool(existing_place),
+    }
+    logger.info("findpath checkpoint status: %s", "; ".join(f"{k}={int(v)}" for k, v in step_status.items()))
+    if args.check_only:
+        logger.info("check-only mode enabled; no commands executed.")
+        return 0
+
     # aDNA-friendly mapping defaults: bwa aln + samse
-    run_command(
-        [
-            bwa_bin,
-            "aln",
-            "-l",
-            str(args.bwa_aln_seedlen),
-            "-n",
-            str(args.bwa_aln_mismatch),
-            "-t",
-            str(args.threads),
-            str(ref),
-            str(fq1),
-        ],
-        stdout_path=sai,
-    )
-    run_command(
-        [bwa_bin, "samse", str(ref), str(sai), str(fq1)],
-        stdout_path=sam,
-    )
-    run_command([samtools_bin, "view", "-bS", "-F", "4", "-q", str(args.min_mapq), "-o", str(mapped_bam), str(sam)])
-    run_command([samtools_bin, "sort", "-n", "-@", str(args.threads), "-o", str(name_sorted_bam), str(mapped_bam)])
-    run_command([samtools_bin, "fixmate", "-m", str(name_sorted_bam), str(fixmate_bam)])
-    run_command([samtools_bin, "sort", "-@", str(args.threads), "-o", str(coord_bam), str(fixmate_bam)])
-    run_command([samtools_bin, "markdup", "-r", str(coord_bam), str(dedup_bam)])
-    run_command([samtools_bin, "index", str(dedup_bam)])
+    if not (args.resume and sai.exists()):
+        run_command(
+            [
+                bwa_bin,
+                "aln",
+                "-l",
+                str(args.bwa_aln_seedlen),
+                "-n",
+                str(args.bwa_aln_mismatch),
+                "-t",
+                str(args.threads),
+                str(ref),
+                str(fq1),
+            ],
+            stdout_path=sai,
+        )
+    if not (args.resume and sam.exists()):
+        run_command(
+            [bwa_bin, "samse", str(ref), str(sai), str(fq1)],
+            stdout_path=sam,
+        )
+    if not (args.resume and mapped_bam.exists()):
+        run_command([samtools_bin, "view", "-bS", "-F", "4", "-q", str(args.min_mapq), "-o", str(mapped_bam), str(sam)])
+    if not (args.resume and name_sorted_bam.exists()):
+        run_command([samtools_bin, "sort", "-n", "-@", str(args.threads), "-o", str(name_sorted_bam), str(mapped_bam)])
+    if not (args.resume and fixmate_bam.exists()):
+        run_command([samtools_bin, "fixmate", "-m", str(name_sorted_bam), str(fixmate_bam)])
+    if not (args.resume and coord_bam.exists()):
+        run_command([samtools_bin, "sort", "-@", str(args.threads), "-o", str(coord_bam), str(fixmate_bam)])
+    if not (args.resume and dedup_bam.exists()):
+        run_command([samtools_bin, "markdup", "-r", str(coord_bam), str(dedup_bam)])
+    if not (args.resume and (dedup_bam.with_suffix(dedup_bam.suffix + ".bai").exists() or dedup_bam.with_suffix(".bam.bai").exists())):
+        run_command([samtools_bin, "index", str(dedup_bam)])
 
     mapdamage_cmd = [mapdamage_bin, "-i", str(dedup_bam), "-r", str(ref), "--rescale", "-d", str(dmg_dir)] + list(args.mapdamage_args)
-    run_command(mapdamage_cmd)
+    if not (args.resume and existing_rescaled):
+        run_command(mapdamage_cmd)
 
     candidates = list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam"))
     if not candidates:
@@ -2857,7 +2886,8 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
             "Please inspect mapDamage outputs or pass --mapdamage-args compatible with your version."
         )
     rescaled_bam = sorted(candidates)[0]
-    run_command([samtools_bin, "index", str(rescaled_bam)])
+    if not (args.resume and (rescaled_bam.with_suffix(rescaled_bam.suffix + ".bai").exists() or rescaled_bam.with_suffix(".bam.bai").exists())):
+        run_command([samtools_bin, "index", str(rescaled_bam)])
 
     out_prefix = place_dir / sample_id
     arg_style = detect_pathphynder_all_arg_style(pathphynder_bin)
@@ -2883,7 +2913,10 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         "--tree_data",
         str(tree_data),
     ] + list(args.pathphynder_args)
-    run_command(path_cmd, cwd=panel_dir)
+    if not (args.resume and existing_place):
+        run_command(path_cmd, cwd=panel_dir)
+    else:
+        logger.info("Skipping pathPhynder placement because outputs for sample '%s' already exist under %s", sample_id, place_dir)
 
     find_manifest = out_dir / "pathphynder_findpath_manifest.tsv"
     with find_manifest.open("wt") as out:
@@ -3559,6 +3592,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("--fastq", help="Input single-end FASTQ (required for --findpath)")
     p_pp.add_argument("--sample-id", help="Sample ID used for output naming in --findpath")
     p_pp.add_argument("--threads", type=int, default=8, help="Threads for bwa/samtools")
+    p_pp.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="Reuse existing intermediate files in --findpath and skip completed steps")
+    p_pp.add_argument("--check-only", action="store_true", help="Only report checkpoint status for --findpath; do not run commands")
     p_pp.add_argument("--min-mapq", type=int, default=20, help="Minimum mapping quality for BAM filtering in --findpath")
     p_pp.add_argument("--min-baseq", type=int, default=20, help="Minimum base quality passed to pathPhynder in --findpath")
     p_pp.add_argument("--bcftools-bin", default="bcftools", help="bcftools executable name/path")

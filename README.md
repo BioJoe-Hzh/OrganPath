@@ -204,6 +204,20 @@ OrganPath Pathphynder \
   --min-baseq 20
 ```
 
+To only check existing intermediates (without rerunning):
+
+```bash
+OrganPath Pathphynder \
+  --findpath \
+  --tree_data pathphynder_prepare_out/tree_data \
+  -t tree.nwk \
+  -r ref.fa \
+  --fastq sample.fastq.gz \
+  -o pathphynder_findpath_out \
+  --sample-id SAMPLE1 \
+  --check-only
+```
+
 For GetOrganelle outputs, `sortOrgan` now prefers `*path_sequence*.fasta` candidates.
 When multiple path candidates exist, it de-duplicates equivalent sequences and selects the best candidate by mapping score to the seed.
 
