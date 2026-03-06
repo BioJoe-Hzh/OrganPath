@@ -3188,6 +3188,13 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
                 dst = place_dir / fp.name
                 if fp.is_file():
                     shutil.copy2(fp, dst)
+        # pathPhynder 1.2.x may write generic outputs under intree_folder/results_folder.
+        # Mirror these folders to OrganPath placement output for consistent downstream access.
+        for folder_name in ["intree_folder", "results_folder"]:
+            src_folder = panel_dir / folder_name
+            dst_folder = place_dir / folder_name
+            if src_folder.exists() and src_folder.is_dir():
+                shutil.copytree(src_folder, dst_folder, dirs_exist_ok=True)
     else:
         logger.info("Skipping pathPhynder placement because outputs for sample '%s' already exist under %s", sample_id, place_dir)
 
