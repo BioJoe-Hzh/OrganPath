@@ -1502,7 +1502,23 @@ def discover_sample_candidates(sample_dir: Path, organelle_mode: str = "generic"
             uniq_mt.append(p)
         fastg_cands = sorted(sample_dir.rglob("*.fastg"))
         fastg = fastg_cands[0] if fastg_cands else None
-        return uniq_mt, fastg, "extended_spades_contigs"
+        if uniq_mt:
+            return uniq_mt, fastg, "extended_spades_contigs"
+        # Fallback for non-standard GetOrganelle layouts.
+        fallback_cands: List[Path] = []
+        for pat in ("*contigs.fasta", "*contigs.fa", "contigs.fasta", "contigs.fa"):
+            fallback_cands.extend(sorted(sample_dir.rglob(pat)))
+        seen_fb = set()
+        uniq_fb = []
+        for p in fallback_cands:
+            sp = str(p)
+            if sp in seen_fb:
+                continue
+            seen_fb.add(sp)
+            uniq_fb.append(p)
+        if uniq_fb:
+            return uniq_fb, fastg, "plant_mt_fallback_contigs"
+        return [], fastg, "extended_spades_contigs"
 
     # Prefer GetOrganelle path sequences (best circular candidates).
     path_cands: List[Path] = []
