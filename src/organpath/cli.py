@@ -2643,6 +2643,30 @@ def resolve_pathphynder_bin(preferred: str) -> str:
     )
 
 
+def detect_pathphynder_all_arg_style(pathphynder_bin: str) -> str:
+    """
+    Return argument style for pathPhynder -s all:
+    - "legacy": uses -b <bam> and -q <baseq>
+    - "modern": uses -q <bam> and -Q <baseq>
+    """
+    try:
+        p = subprocess.run(
+            [pathphynder_bin, "-h"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        help_txt = (p.stdout or "") + "\n" + (p.stderr or "")
+    except Exception:
+        return "legacy"
+
+    has_cap_q = bool(re.search(r"(^|\\s)-Q(\\s|,|$)", help_txt))
+    has_b = bool(re.search(r"(^|\\s)-b(\\s|,|$)", help_txt))
+    if has_cap_q and not has_b:
+        return "modern"
+    return "legacy"
+
+
 def cmd_pathphynder(args: argparse.Namespace) -> int:
     mode_count = int(args.prepare) + int(args.findpath)
     if mode_count != 1:
@@ -2836,6 +2860,11 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     run_command([samtools_bin, "index", str(rescaled_bam)])
 
     out_prefix = place_dir / sample_id
+    arg_style = detect_pathphynder_all_arg_style(pathphynder_bin)
+    if arg_style == "modern":
+        io_args = ["-q", str(rescaled_bam), "-Q", str(args.min_baseq)]
+    else:
+        io_args = ["-b", str(rescaled_bam), "-q", str(args.min_baseq)]
     path_cmd = [
         pathphynder_bin,
         "-s",
@@ -2848,10 +2877,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         str(snp_prefix),
         "-r",
         str(ref),
-        "-q",
-        str(rescaled_bam),
-        "-Q",
-        str(args.min_baseq),
+    ] + io_args + [
         "-o",
         str(out_prefix),
         "--tree_data",
