@@ -181,8 +181,23 @@ OrganPath Pathphynder \
   --prefix panel_name
 ```
 
+If your panel VCF has multiple chromosomes/contigs and `phynder -B` fails, flatten to one synthetic coordinate system:
+
+```bash
+OrganPath Pathphynder \
+  --prepare \
+  -v input.vcf.gz \
+  -r ref.fa \
+  -t tree.nwk \
+  -o pathphynder_prepare_out \
+  --prefix panel_name \
+  --concat-multi-chrom \
+  --concat-chrom-name mt_concat
+```
+
 This runs:
 - `bcftools norm -m -any -a -f` to atomize/split multi-allelic/complex variants (no filtering)
+- optional `--concat-multi-chrom`: rewrite normalized VCF to one synthetic `CHROM`, shifting each contig by cumulative reference length and writing `panel_name.concat_pos_map.tsv` to map new positions back to original `CHROM:POS`
 - `phynder -B` on normalized VCF to create `panel_name.snp`
 - `pathPhynder -s prepare` to build prepare files
 - writes `pathphynder_prepare_manifest.tsv` for downstream usage

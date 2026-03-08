@@ -511,6 +511,94 @@ def run_alignment_with_direction(
         write_fasta_sequences(aligned, normalized)
 
 
+def flatten_multichrom_vcf_to_single_chrom(
+    in_vcf: Path,
+    ref_fasta: Path,
+    out_vcf: Path,
+    map_tsv: Path,
+    merged_chrom_name: str,
+) -> Dict[str, int]:
+    refs = parse_ref_fasta(ref_fasta)
+    if not refs:
+        raise ValueError(f"Reference fasta is empty: {ref_fasta}")
+
+    chrom_order = list(refs.keys())
+    chrom_offsets: Dict[str, int] = {}
+    running = 0
+    for chrom in chrom_order:
+        chrom_offsets[chrom] = running
+        running += len(refs[chrom])
+
+    in_record_count = 0
+    out_record_count = 0
+    seen_chroms = set()
+
+    with open_maybe_gzip(in_vcf, "rt") as inp, out_vcf.open("wt") as out, map_tsv.open("wt") as mp:
+        mp.write("new_chrom\tnew_pos\torig_chrom\torig_pos\toffset\tref\talt\tid\n")
+
+        for raw in inp:
+            if raw.startswith("##"):
+                out.write(raw)
+                continue
+
+            if raw.startswith("#CHROM"):
+                out.write(f"##contig=<ID={merged_chrom_name},length={running}>\n")
+                out.write(raw)
+                continue
+
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            fields = line.split("\t")
+            if len(fields) < 8:
+                continue
+            in_record_count += 1
+
+            chrom = fields[0]
+            if chrom not in chrom_offsets:
+                raise ValueError(
+                    f"VCF CHROM '{chrom}' not found in reference fasta contigs. "
+                    f"Please ensure --ref matches the VCF coordinates."
+                )
+            seen_chroms.add(chrom)
+
+            try:
+                pos = int(fields[1])
+            except ValueError as exc:
+                raise ValueError(f"Invalid VCF POS '{fields[1]}' in {in_vcf}") from exc
+
+            ref_len = len(refs[chrom])
+            if pos < 1 or pos > ref_len:
+                raise ValueError(
+                    f"VCF position out of range for {chrom}: {pos} (1..{ref_len})"
+                )
+
+            offset = chrom_offsets[chrom]
+            new_pos = offset + pos
+            fields[0] = merged_chrom_name
+            fields[1] = str(new_pos)
+            out.write("\t".join(fields) + "\n")
+            out_record_count += 1
+
+            var_id = fields[2] if len(fields) > 2 else "."
+            ref_allele = fields[3] if len(fields) > 3 else "."
+            alt_allele = fields[4] if len(fields) > 4 else "."
+            mp.write(
+                f"{merged_chrom_name}\t{new_pos}\t{chrom}\t{pos}\t{offset}\t"
+                f"{ref_allele}\t{alt_allele}\t{var_id}\n"
+            )
+
+    if not seen_chroms:
+        raise ValueError(f"No VCF records found to flatten: {in_vcf}")
+
+    return {
+        "input_records": in_record_count,
+        "output_records": out_record_count,
+        "input_contigs": len(seen_chroms),
+        "merged_length": running,
+    }
+
+
 def write_ref_from_msa(msa_fa: Path, out_ref: Path, ref_id: Optional[str]) -> str:
     seqs = read_fasta_sequences(msa_fa)
     if ref_id:
@@ -3100,6 +3188,8 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
 
         prefix = args.prefix or tree.stem
         norm_vcf = out_dir / f"{prefix}.atomized.norm.vcf"
+        phynder_input_vcf = norm_vcf
+        flatten_map_tsv: Optional[Path] = None
         snp_prefix = out_dir / f"{prefix}.snp"
         prepare_prefix = out_dir / prefix
         prepare_prefix_name = prefix
@@ -3136,7 +3226,25 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
                 str(norm_vcf),
             ]
         )
-        run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(norm_vcf)])
+        if args.concat_multi_chrom:
+            phynder_input_vcf = out_dir / f"{prefix}.concat_for_phynder.vcf"
+            flatten_map_tsv = out_dir / f"{prefix}.concat_pos_map.tsv"
+            flatten_stats = flatten_multichrom_vcf_to_single_chrom(
+                in_vcf=norm_vcf,
+                ref_fasta=ref,
+                out_vcf=phynder_input_vcf,
+                map_tsv=flatten_map_tsv,
+                merged_chrom_name=args.concat_chrom_name,
+            )
+            logger.info(
+                "Flattened VCF for phynder: input_contigs=%d, records=%d, merged_length=%d, map=%s",
+                flatten_stats["input_contigs"],
+                flatten_stats["output_records"],
+                flatten_stats["merged_length"],
+                flatten_map_tsv,
+            )
+
+        run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(phynder_input_vcf)])
         # pathPhynder prepare writes files under relative paths (e.g. tree_data/).
         # Run inside out_dir and use basename prefix to avoid malformed tree_data/<abs_path>.
         run_command(
@@ -3160,6 +3268,10 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
             out.write(f"tree\t{tree}\n")
             out.write(f"vcf\t{vcf}\n")
             out.write(f"normalized_vcf\t{norm_vcf}\n")
+            out.write(f"phynder_input_vcf\t{phynder_input_vcf}\n")
+            out.write(f"concat_multi_chrom\t{str(bool(args.concat_multi_chrom)).lower()}\n")
+            out.write(f"concat_chrom_name\t{args.concat_chrom_name}\n")
+            out.write(f"concat_pos_map\t{flatten_map_tsv if flatten_map_tsv else ''}\n")
             out.write(f"ref\t{ref}\n")
             out.write(f"snp_prefix\t{snp_prefix}\n")
             out.write(f"prepare_prefix\t{prepare_prefix}\n")
@@ -4036,6 +4148,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_pp.add_argument("--bcftools-bin", default="bcftools", help="bcftools executable name/path")
     p_pp.add_argument("--phynder-bin", default="phynder", help="phynder executable name/path")
     p_pp.add_argument("--pathphynder-bin", default="pathPhynder", help="pathPhynder executable name/path")
+    p_pp.add_argument(
+        "--concat-multi-chrom",
+        action="store_true",
+        help="In --prepare, flatten multi-CHROM VCF to one synthetic chromosome with cumulative coordinates for phynder",
+    )
+    p_pp.add_argument(
+        "--concat-chrom-name",
+        default="concat_chr",
+        help="Synthetic chromosome name used with --concat-multi-chrom",
+    )
     p_pp.add_argument("--bwa-bin", default="bwa", help="bwa executable name/path (for --findpath)")
     p_pp.add_argument("--bwa-aln-seedlen", type=int, default=1024, help="bwa aln -l seed length (default aDNA-friendly: 1024)")
     p_pp.add_argument("--bwa-aln-mismatch", default="0.01", help="bwa aln -n mismatch fraction/edits (default: 0.01)")
