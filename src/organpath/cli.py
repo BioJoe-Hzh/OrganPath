@@ -3343,7 +3343,10 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
 
     existing_rescaled = sorted(list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam")))
     existing_place = sorted(place_dir.glob(f"{sample_id}*"))
-    existing_place += sorted((panel_dir / "intree_folder").glob(f"{sample_id}*")) if (panel_dir / "intree_folder").exists() else []
+    panel_place_files: List[Path] = []
+    for src_dir in [panel_dir / "intree_folder", panel_dir]:
+        if src_dir.exists():
+            panel_place_files.extend(sorted(src_dir.glob(f"{sample_id}*")))
 
     step_status = {
         "sai": sai.exists(),
@@ -3356,6 +3359,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         "dedup_bai": dedup_bam.with_suffix(dedup_bam.suffix + ".bai").exists() or dedup_bam.with_suffix(".bam.bai").exists(),
         "rescaled_bam": bool(existing_rescaled),
         "placement_any": bool(existing_place),
+        "placement_panel_side_only": bool(panel_place_files) and not bool(existing_place),
     }
     logger.info("findpath checkpoint status: %s", "; ".join(f"{k}={int(v)}" for k, v in step_status.items()))
     if args.check_only:
@@ -3441,6 +3445,21 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         "-o",
         out_prefix_name,
     ] + list(args.pathphynder_args)
+    # Recover prior pathPhynder outputs from panel_dir into placement dir when possible.
+    if args.resume and (not existing_place) and panel_place_files:
+        for fp in panel_place_files:
+            dst = place_dir / fp.name
+            if fp.is_file():
+                shutil.copy2(fp, dst)
+        existing_place = sorted(place_dir.glob(f"{sample_id}*"))
+        if existing_place:
+            logger.info(
+                "Recovered existing pathPhynder outputs for sample '%s' into %s (copied %d files).",
+                sample_id,
+                place_dir,
+                len(existing_place),
+            )
+
     if not (args.resume and existing_place):
         run_pathphynder_all_with_fallbacks(
             pathphynder_bin=pathphynder_bin,
@@ -3465,7 +3484,11 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
             if src_folder.exists() and src_folder.is_dir():
                 shutil.copytree(src_folder, dst_folder, dirs_exist_ok=True)
     else:
-        logger.info("Skipping pathPhynder placement because outputs for sample '%s' already exist under %s", sample_id, place_dir)
+        logger.info(
+            "Skipping pathPhynder placement because outputs for sample '%s' already exist under %s",
+            sample_id,
+            place_dir,
+        )
 
     find_manifest = out_dir / "pathphynder_findpath_manifest.tsv"
     with find_manifest.open("wt") as out:
