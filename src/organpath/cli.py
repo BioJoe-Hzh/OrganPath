@@ -280,6 +280,22 @@ def write_name_map(path: Path, samples: List[str], name_map: Dict[str, str], mod
             out.write(f"{s}\t{name_map.get(s, s)}\n")
 
 
+def read_key_value_manifest(path: Path) -> Dict[str, str]:
+    vals: Dict[str, str] = {}
+    if not path.exists():
+        return vals
+    with path.open("rt") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t", 1)
+            if len(cols) != 2 or cols[0] == "key":
+                continue
+            vals[cols[0]] = cols[1]
+    return vals
+
+
 def extract_tree_tip_names(newick_text: str) -> List[str]:
     names: List[str] = []
 
@@ -596,6 +612,28 @@ def flatten_multichrom_vcf_to_single_chrom(
         "output_records": out_record_count,
         "input_contigs": len(seen_chroms),
         "merged_length": running,
+    }
+
+
+def write_concatenated_reference_fasta(
+    ref_fasta: Path,
+    out_fasta: Path,
+    merged_chrom_name: str,
+) -> Dict[str, int]:
+    refs = parse_ref_fasta(ref_fasta)
+    if not refs:
+        raise ValueError(f"Reference fasta is empty: {ref_fasta}")
+
+    ordered = list(refs.keys())
+    merged_seq = "".join("".join(refs[c]) for c in ordered)
+    with out_fasta.open("wt") as out:
+        out.write(f">{merged_chrom_name}\n")
+        for i in range(0, len(merged_seq), 80):
+            out.write(merged_seq[i : i + 80] + "\n")
+
+    return {
+        "input_contigs": len(ordered),
+        "merged_length": len(merged_seq),
     }
 
 
@@ -3190,6 +3228,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         norm_vcf = out_dir / f"{prefix}.atomized.norm.vcf"
         phynder_input_vcf = norm_vcf
         flatten_map_tsv: Optional[Path] = None
+        concat_ref_fasta: Optional[Path] = None
         snp_prefix = out_dir / f"{prefix}.snp"
         prepare_prefix = out_dir / prefix
         prepare_prefix_name = prefix
@@ -3229,6 +3268,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         if args.concat_multi_chrom:
             phynder_input_vcf = out_dir / f"{prefix}.concat_for_phynder.vcf"
             flatten_map_tsv = out_dir / f"{prefix}.concat_pos_map.tsv"
+            concat_ref_fasta = out_dir / f"{prefix}.concat_ref.fa"
             flatten_stats = flatten_multichrom_vcf_to_single_chrom(
                 in_vcf=norm_vcf,
                 ref_fasta=ref,
@@ -3236,13 +3276,24 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
                 map_tsv=flatten_map_tsv,
                 merged_chrom_name=args.concat_chrom_name,
             )
+            concat_ref_stats = write_concatenated_reference_fasta(
+                ref_fasta=ref,
+                out_fasta=concat_ref_fasta,
+                merged_chrom_name=args.concat_chrom_name,
+            )
             logger.info(
-                "Flattened VCF for phynder: input_contigs=%d, records=%d, merged_length=%d, map=%s",
+                "Flattened VCF for phynder: input_contigs=%d, records=%d, merged_length=%d, map=%s, concat_ref=%s",
                 flatten_stats["input_contigs"],
                 flatten_stats["output_records"],
                 flatten_stats["merged_length"],
                 flatten_map_tsv,
+                concat_ref_fasta,
             )
+            if flatten_stats["merged_length"] != concat_ref_stats["merged_length"]:
+                raise ValueError(
+                    "Concatenated VCF/reference coordinate lengths do not match; "
+                    "please verify VCF/reference contig naming."
+                )
 
         run_command([phynder_bin, "-B", "-o", str(snp_prefix), str(tree), str(phynder_input_vcf)])
         # pathPhynder prepare writes files under relative paths (e.g. tree_data/).
@@ -3272,6 +3323,7 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
             out.write(f"concat_multi_chrom\t{str(bool(args.concat_multi_chrom)).lower()}\n")
             out.write(f"concat_chrom_name\t{args.concat_chrom_name}\n")
             out.write(f"concat_pos_map\t{flatten_map_tsv if flatten_map_tsv else ''}\n")
+            out.write(f"concat_ref_fasta\t{concat_ref_fasta if concat_ref_fasta else ''}\n")
             out.write(f"ref\t{ref}\n")
             out.write(f"snp_prefix\t{snp_prefix}\n")
             out.write(f"prepare_prefix\t{prepare_prefix}\n")
@@ -3316,6 +3368,29 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Expected SNP panel file not found: {snp_prefix}")
     prepare_prefix = panel_dir / prepare_prefix_name
 
+    prepare_manifest = read_key_value_manifest(panel_dir / "pathphynder_prepare_manifest.tsv")
+    prepare_used_concat = prepare_manifest.get("concat_multi_chrom", "").lower() == "true"
+    concat_ref_txt = prepare_manifest.get("concat_ref_fasta", "").strip()
+    if prepare_used_concat:
+        if concat_ref_txt:
+            concat_ref = Path(concat_ref_txt).resolve()
+            if not concat_ref.exists():
+                raise FileNotFoundError(
+                    f"prepare manifest indicates concatenated reference but file is missing: {concat_ref}"
+                )
+            if ref != concat_ref:
+                logger.info(
+                    "Panel was prepared with --concat-multi-chrom; overriding findpath reference from %s to %s",
+                    ref,
+                    concat_ref,
+                )
+            ref = concat_ref
+        else:
+            raise ValueError(
+                "prepare manifest indicates concat mode but concat_ref_fasta is missing. "
+                "Please rerun prepare with latest OrganPath."
+            )
+
     fq1 = Path(args.fastq).resolve()
     fq2 = None
     if not fq1.exists():
@@ -3340,6 +3415,24 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
     fixmate_bam = align_dir / f"{sample_id}.fixmate.bam"
     coord_bam = align_dir / f"{sample_id}.coordsort.bam"
     dedup_bam = align_dir / f"{sample_id}.q{args.min_mapq}.rmdup.bam"
+
+    site_chroms = set()
+    with site_beds[0].open("rt") as bed:
+        for raw in bed:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if cols:
+                site_chroms.add(cols[0])
+    ref_contigs = set(parse_ref_fasta(ref).keys())
+    missing = sorted(site_chroms - ref_contigs)
+    if missing:
+        raise ValueError(
+            "Pathphynder site BED contigs are not present in findpath reference. "
+            f"Missing={missing[:5]} (showing up to 5). "
+            "Use a reference in the same coordinate system as prepare outputs."
+        )
 
     existing_rescaled = sorted(list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam")))
     existing_place = sorted(place_dir.glob(f"{sample_id}*"))

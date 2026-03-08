@@ -198,9 +198,12 @@ OrganPath Pathphynder \
 This runs:
 - `bcftools norm -m -any -a -f` to atomize/split multi-allelic/complex variants (no filtering)
 - optional `--concat-multi-chrom`: rewrite normalized VCF to one synthetic `CHROM`, shifting each contig by cumulative reference length and writing `panel_name.concat_pos_map.tsv` to map new positions back to original `CHROM:POS`
+- optional `--concat-multi-chrom`: also writes `panel_name.concat_ref.fa` (single synthetic reference sequence) used for coordinate-consistent `--findpath`
 - `phynder -B` on normalized VCF to create `panel_name.snp`
 - `pathPhynder -s prepare` to build prepare files
 - writes `pathphynder_prepare_manifest.tsv` for downstream usage
+
+When `--findpath` is pointed to this prepare output (`--tree_data .../tree_data`), OrganPath auto-detects concat-mode from the prepare manifest and automatically uses `panel_name.concat_ref.fa` for mapping/placement coordinates.
 
 Run Pathphynder placement directly from FASTQ (map to ref -> MAPQ filter -> remove duplicates -> mapDamage rescale -> `pathPhynder -s all`):
 
