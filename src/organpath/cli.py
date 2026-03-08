@@ -637,6 +637,11 @@ def write_concatenated_reference_fasta(
     }
 
 
+def has_bwa_index_files(ref_fasta: Path) -> bool:
+    exts = [".amb", ".ann", ".bwt", ".pac", ".sa"]
+    return all(Path(str(ref_fasta) + ext).exists() for ext in exts)
+
+
 def write_ref_from_msa(msa_fa: Path, out_ref: Path, ref_id: Optional[str]) -> str:
     seqs = read_fasta_sequences(msa_fa)
     if ref_id:
@@ -3433,6 +3438,13 @@ def cmd_pathphynder(args: argparse.Namespace) -> int:
             f"Missing={missing[:5]} (showing up to 5). "
             "Use a reference in the same coordinate system as prepare outputs."
         )
+    if not has_bwa_index_files(ref):
+        logger.info("BWA index not found for %s; building index now.", ref)
+        run_command([bwa_bin, "index", str(ref)])
+    fai = Path(str(ref) + ".fai")
+    if not fai.exists():
+        logger.info("samtools faidx not found for %s; building index now.", ref)
+        run_command([samtools_bin, "faidx", str(ref)])
 
     existing_rescaled = sorted(list(dmg_dir.glob("*.rescaled.bam")) + list(dmg_dir.glob("*rescaled*.bam")) + list(out_dir.glob("*.rescaled.bam")))
     existing_place = sorted(place_dir.glob(f"{sample_id}*"))
