@@ -83,6 +83,7 @@ OrganPath sortOrgan \
 - `plant_pt`: chloroplast-oriented sorting; output is rotated to seed start/orientation.
 - `plant_mt`: mitochondrial homolog filtering against seed (reduce nuclear contamination).
   You can also provide `--cp-exclude-ref` to remove large chloroplast-like contigs while keeping short plastid-derived transfers.
+  Output keeps selected contigs as separate FASTA records per sample; contigs are not joined by `N`.
 - `animal_mt`: mitochondrial sorting with seed-start rotation for consistent coordinates.
 - `generic`: original contig-order behavior.
 
@@ -126,6 +127,7 @@ Outputs:
 - `sortorgan_summary.tsv` (per-sample summary)
 - `assembled_samples.fasta` (merged multifasta)
 - per-sample `*.organellar.fasta`
+  In `plant_mt`, this is a multi-record FASTA with one record per retained contig.
 - for `plant_pt` single-IR: per-sample `sample.LSC.fasta`, `sample.IR.fasta`, `sample.SSC.fasta`
 - for `plant_pt` single-IR: merged `partitions/LSC_samples.fasta`, `partitions/IR_samples.fasta`, `partitions/SSC_samples.fasta`
 

@@ -272,6 +272,10 @@ def safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
 
 
+def make_contig_record_id(sample_name: str, contig_id: str, rank: int) -> str:
+    return f"{safe_filename(sample_name)}__c{rank:03d}__{safe_filename(contig_id)}"
+
+
 def write_name_map(path: Path, samples: List[str], name_map: Dict[str, str], mode: str) -> None:
     with path.open("wt") as out:
         out.write(f"# mode={mode}\n")
@@ -2083,12 +2087,12 @@ def build_sample_assembly_from_contigs(
             out.write(f">{sample_name}\n{merged}\n")
         return str(out_fa), kept, len(merged), note, part_dict, cp_excluded_notes
 
-    n_gap = "N" * gap_n
     seq_parts: List[str] = []
     kept = 0
+    seq_ids: List[str] = []
     with (out_dir / f"{sample_name}.selected_contigs.tsv").open("wt") as tab:
         tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\n")
-        for contig_id, sstart, send, strand, ident, alen, qstart, qend in chosen:
+        for rank, (contig_id, sstart, send, strand, ident, alen, qstart, qend) in enumerate(chosen, start=1):
             if contig_id not in contigs:
                 continue
             cseq = contigs[contig_id]
@@ -2097,15 +2101,25 @@ def build_sample_assembly_from_contigs(
             if strand == "-":
                 cseq = reverse_complement(cseq)
             seq_parts.append(cseq)
+            seq_ids.append(make_contig_record_id(sample_name, contig_id, rank))
             tab.write(f"{contig_id}\t{sstart}\t{send}\t{strand}\t{ident:.4f}\t{alen}\n")
             kept += 1
 
-    merged = n_gap.join(seq_parts)
     note = "-"
     if organelle_mode == "plant_mt":
-        note = "orientation_only:no_seed_reorder"
+        note = "multicontig:orientation_only:no_seed_reorder"
         if cp_excluded_notes:
             note += ";cp_excluded:" + ",".join(cp_excluded_notes)
+        out_fa = out_dir / f"{sample_name}.organellar.fasta"
+        total_len = 0
+        with out_fa.open("wt") as out:
+            for sid, seq in zip(seq_ids, seq_parts):
+                total_len += len(seq)
+                out.write(f">{sid}\n{seq}\n")
+        return str(out_fa), kept, total_len, note, None, cp_excluded_notes
+
+    n_gap = "N" * gap_n
+    merged = n_gap.join(seq_parts)
     if organelle_mode in {"plant_pt", "animal_mt"} and seed_seq:
         merged, orient = rotate_sequence_to_seed_start(merged, seed_seq=seed_seq)
         note = f"rotated:{orient}"
@@ -2279,7 +2293,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 cp_exclude_min_query_cov=args.cp_exclude_min_query_cov,
             )
             seqs = read_fasta_sequences(Path(out_fa))
-            seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
+            seq_non_n = sum(non_n_length(seq) for seq in seqs.values())
             accepted = seq_non_n >= args.min_non_n_len
             status = "OK" if accepted else "FILTERED"
             note2 = note if accepted else (
