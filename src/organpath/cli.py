@@ -1907,7 +1907,7 @@ def build_sample_assembly_from_contigs(
     cp_exclude_min_identity: float = 0.98,
     cp_exclude_min_len: int = 5000,
     cp_exclude_min_query_cov: float = 0.8,
-) -> Tuple[str, int, int, str, Optional[Dict[str, str]]]:
+) -> Tuple[str, int, int, str, Optional[Dict[str, str]], List[str]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
     if not contigs:
@@ -2010,7 +2010,7 @@ def build_sample_assembly_from_contigs(
                 tab.write("contig\tseed_start\tseed_end\tstrand\tidentity\taln_len\tregion\n")
                 h = chosen[0]
                 tab.write(f"{h[0]}\t{h[1]}\t{h[2]}\t{h[3]}\t{h[4]:.4f}\t{h[5]}\tcomplete\n")
-            return str(out_fa), 1, len(complete_seq), note, complete_parts
+            return str(out_fa), 1, len(complete_seq), note, complete_parts, cp_excluded_notes
 
         # Fragmented route
         region_order = ["LSC", ir_name, "SSC"]
@@ -2081,7 +2081,7 @@ def build_sample_assembly_from_contigs(
         out_fa = out_dir / f"{sample_name}.organellar.fasta"
         with out_fa.open("wt") as out:
             out.write(f">{sample_name}\n{merged}\n")
-        return str(out_fa), kept, len(merged), note, part_dict
+        return str(out_fa), kept, len(merged), note, part_dict, cp_excluded_notes
 
     n_gap = "N" * gap_n
     seq_parts: List[str] = []
@@ -2115,7 +2115,7 @@ def build_sample_assembly_from_contigs(
     out_fa = out_dir / f"{sample_name}.organellar.fasta"
     with out_fa.open("wt") as out:
         out.write(f">{sample_name}\n{merged}\n")
-    return str(out_fa), kept, len(merged), note, None
+    return str(out_fa), kept, len(merged), note, None, cp_excluded_notes
 
 
 def cmd_sort_organ(args: argparse.Namespace) -> int:
@@ -2220,6 +2220,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             "fastg": str(fastg) if fastg else "-",
             "assembled_fasta": "-",
             "message": "no candidate fasta found",
+            "cp_excluded_contigs": "-",
             "accepted": False,
             "seqs": {},
             "part_seqs": None,
@@ -2253,7 +2254,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             )
             ref_covered_bp, mean_identity, aligned_bp = summarize_hit_stats(stat_hits, ref_len=len(seed_seq))
             ref_covered_frac = (ref_covered_bp / len(seed_seq)) if len(seed_seq) > 0 else 0.0
-            out_fa, nsel, alen, note, part_seqs = build_sample_assembly_from_contigs(
+            out_fa, nsel, alen, note, part_seqs, cp_excluded_notes = build_sample_assembly_from_contigs(
                 contig_fa=chosen_fa,
                 seed_fa=seed,
                 sample_name=sample,
@@ -2301,6 +2302,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     "candidate_count": cand_n,
                     "assembled_fasta": str(out_fa),
                     "message": note2,
+                    "cp_excluded_contigs": ",".join(cp_excluded_notes) if cp_excluded_notes else "-",
                     "accepted": accepted,
                     "seqs": seqs if accepted else {},
                     "part_seqs": part_seqs if accepted else None,
@@ -2319,6 +2321,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                     f"aligned_bp\t{aligned_bp}",
                     f"status\t{status}",
                     f"message\t{note2}",
+                    f"cp_excluded_contigs\t{','.join(cp_excluded_notes) if cp_excluded_notes else '-'}",
                 ]
             )
         except Exception as exc:
@@ -2335,7 +2338,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         try:
             part_handles = {"LSC": lsc_fh, "IR": ir_fh, "SSC": ssc_fh}
             sumf.write(
-                "sample\tstatus\tmode\tsource\tselected_contigs\tnon_n_len\tassembled_len\tref_covered_bp\tref_covered_frac\tmean_identity\taligned_bp\tchosen_fasta\tcandidate_count\tfastg\tassembled_fasta\tmessage\n"
+                "sample\tstatus\tmode\tsource\tselected_contigs\tnon_n_len\tassembled_len\tref_covered_bp\tref_covered_frac\tmean_identity\taligned_bp\tchosen_fasta\tcandidate_count\tfastg\tassembled_fasta\tcp_excluded_contigs\tmessage\n"
             )
             workers = max(1, int(getattr(args, "jobs", 1)))
             if workers == 1:
@@ -2358,6 +2361,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 cand_n = int(rec["candidate_count"])
                 fastg = str(rec["fastg"])
                 out_fa = str(rec["assembled_fasta"])
+                cp_excluded_contigs = str(rec.get("cp_excluded_contigs", "-"))
                 note2 = str(rec["message"])
                 if bool(rec.get("accepted", False)):
                     seqs = rec.get("seqs", {}) or {}
@@ -2377,7 +2381,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                             if fh and pseq:
                                 fh.write(f">{sample}\n{pseq}\n")
                 sumf.write(
-                    f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{nsel}\t{seq_non_n}\t{alen}\t{ref_covered_bp}\t{ref_covered_frac:.4f}\t{mean_identity:.4f}\t{aligned_bp}\t{chosen_fa}\t{cand_n}\t{fastg}\t{out_fa}\t{note2}\n"
+                    f"{sample}\t{status}\t{args.organelle_mode}\t{source}\t{nsel}\t{seq_non_n}\t{alen}\t{ref_covered_bp}\t{ref_covered_frac:.4f}\t{mean_identity:.4f}\t{aligned_bp}\t{chosen_fa}\t{cand_n}\t{fastg}\t{out_fa}\t{cp_excluded_contigs}\t{note2}\n"
                 )
         finally:
             for fh in (lsc_fh, ir_fh, ssc_fh):
