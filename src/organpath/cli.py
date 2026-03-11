@@ -2769,6 +2769,52 @@ def run_panman_pipeline(args: argparse.Namespace, input_fa: Path, out_dir: Path,
     }
 
 
+def run_mtblocks_pangraph_pipeline(args: argparse.Namespace, input_fa: Path, out_dir: Path) -> Dict[str, Path]:
+    pangraph_out = out_dir / "pangraph"
+    pangraph_out.mkdir(parents=True, exist_ok=True)
+    pangraph_json = Path(args.pangraph_json).resolve() if args.pangraph_json else (pangraph_out / "pangraph_output.json")
+    blocks_dir = Path(args.blocks_dir).resolve() if args.blocks_dir else (out_dir / "pangraph_blocks")
+
+    def _render_tokens(items: List[str]) -> List[str]:
+        rendered: List[str] = []
+        for x in items:
+            rendered.append(
+                x.replace("{input_fasta}", str(input_fa))
+                .replace("{pangraph_out}", str(pangraph_out))
+                .replace("{pangraph_json}", str(pangraph_json))
+                .replace("{blocks_dir}", str(blocks_dir))
+            )
+        return rendered
+
+    if args.run_pangraph:
+        pangraph_bin = shutil.which(args.pangraph_bin)
+        if not pangraph_bin:
+            raise RuntimeError(f"PanGraph executable not found: {args.pangraph_bin}")
+        blocks_dir.mkdir(parents=True, exist_ok=True)
+        if not args.pangraph_args:
+            raise ValueError(
+                "mtBlocks now requires --pangraph-args when --run-pangraph is used. "
+                "Your pangraph workflow must write LCB/block FASTA files into --blocks-dir. "
+                "Supported placeholders: {input_fasta} {pangraph_out} {pangraph_json} {blocks_dir}."
+            )
+        run_command([pangraph_bin] + _render_tokens(list(args.pangraph_args)))
+    elif not pangraph_json.exists() and not blocks_dir.exists():
+        raise FileNotFoundError(
+            "mtBlocks requires either --run-pangraph or existing --pangraph-json/--blocks-dir output."
+        )
+
+    if not blocks_dir.exists():
+        raise FileNotFoundError(
+            f"mtBlocks expected LCB/block FASTA directory but not found: {blocks_dir}. "
+            "Please point --blocks-dir to Pangraph-derived block FASTAs or make --pangraph-args write them."
+        )
+
+    return {
+        "pangraph_json": pangraph_json,
+        "blocks_dir": blocks_dir,
+    }
+
+
 def cmd_panman(args: argparse.Namespace) -> int:
     input_fa = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
@@ -2805,7 +2851,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         input_fa = input_path
         sample_map = infer_mtblocks_sample_map_from_fasta(input_fa)
 
-    paths = run_panman_pipeline(args, input_fa=input_fa, out_dir=out_dir, strict_args=True)
+    paths = run_mtblocks_pangraph_pipeline(args, input_fa=input_fa, out_dir=out_dir)
     blocks_dir = paths["blocks_dir"]
     if not blocks_dir.exists():
         raise FileNotFoundError(f"blocks-dir not found: {blocks_dir}")
@@ -2889,6 +2935,10 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
             model=args.model,
             safe=not args.unsafe,
         )
+        treefile = out_dir / "ml" / "organpath_tree.treefile"
+        if treefile.exists():
+            shutil.copyfile(treefile, out_dir / "mtblocks.treefile")
+            logger.info("Copied mtBlocks ML tree to: %s", out_dir / "mtblocks.treefile")
     return 0
 
 
@@ -2984,19 +3034,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         pangraph_bin=args.pangraph_bin,
         pangraph_args=args.pangraph_args,
         pangraph_json=args.pangraph_json,
-        aln_file=args.aln_file,
-        guide_tree=args.guide_tree,
-        dipper_graph=args.dipper_graph,
-        run_dipper=args.run_dipper,
-        dipper_bin=args.dipper_bin,
-        dipper_args=args.dipper_args,
-        run_twilight=args.run_twilight,
-        twilight_bin=args.twilight_bin,
-        twilight_args=args.twilight_args,
         blocks_dir=args.blocks_dir,
-        run_panman=args.run_panman,
-        panman_bin=args.panman_bin,
-        panman_args=args.panman_args,
         mafft_bin=args.mafft_bin,
         trimal_bin=args.trimal_bin,
         block_jobs=args.block_jobs,
@@ -4937,7 +4975,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mt = subs.add_parser(
         "mtBlocks",
-        help="Plant mitochondrial route: panman blocks -> block MAFFT+trimAl -> concatenated supermatrix",
+        help="Plant mitochondrial route: Pangraph LCB/block FASTAs -> block MAFFT+trimAl -> concatenated supermatrix -> IQ-TREE",
     )
     p_mt.add_argument(
         "-i",
@@ -4946,43 +4984,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Input sortOrgan output directory or multifasta. Directory mode preserves per-sample multi-contig mt assemblies.",
     )
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
-    p_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
+    p_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph / LCB generation stage")
     p_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
     p_mt.add_argument(
         "--pangraph-args",
         nargs="*",
         default=[],
-        help="Arguments passed to PanGraph. Supports placeholders: {input_fasta} {pangraph_out} {pangraph_json}",
+        help="Arguments passed to PanGraph / LCB export workflow. Supports placeholders: {input_fasta} {pangraph_out} {pangraph_json} {blocks_dir}",
     )
     p_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
-    p_mt.add_argument("--aln-file", help="Existing MSA fasta (if already generated)")
-    p_mt.add_argument("--guide-tree", help="Existing guide tree nwk (if already generated)")
-    p_mt.add_argument("--dipper-graph", help="Expected dipper graph path (for twilight/panman)")
-    p_mt.add_argument("--run-dipper", action="store_true", help="Run DIPPER to produce graph/MSA")
-    p_mt.add_argument("--dipper-bin", default="dipper", help="DIPPER executable name/path")
-    p_mt.add_argument(
-        "--dipper-args",
-        nargs="*",
-        default=[],
-        help="Arguments passed to DIPPER. Supports placeholders: {input_fasta} {dipper_out} {dipper_graph} {aln_fasta}",
-    )
-    p_mt.add_argument("--run-twilight", action="store_true", help="Run TWILIGHT to produce guide tree")
-    p_mt.add_argument("--twilight-bin", default="twilight", help="TWILIGHT executable name/path")
-    p_mt.add_argument(
-        "--twilight-args",
-        nargs="*",
-        default=[],
-        help="Arguments passed to TWILIGHT. Supports placeholders: {dipper_graph} {aln_fasta} {twilight_out} {guide_tree}",
-    )
-    p_mt.add_argument("--blocks-dir", help="Directory containing block fasta files (if panman already run)")
-    p_mt.add_argument("--run-panman", action="store_true", help="Run panman to generate blocks")
-    p_mt.add_argument("--panman-bin", default="panmanUtils", help="panman executable name/path")
-    p_mt.add_argument(
-        "--panman-args",
-        nargs="*",
-        default=[],
-        help="Arguments passed directly to panmanUtils (must generate block FASTA files into --blocks-dir)",
-    )
+    p_mt.add_argument("--blocks-dir", help="Directory containing Pangraph-derived LCB/block FASTA files")
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
@@ -5005,10 +5016,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mt.add_argument("--block-min-samples", type=int, default=2, help="Skip blocks with fewer than this many samples")
     p_mt.add_argument("--block-min-sites", type=int, default=1, help="Skip blocks with fewer than this many final alignment columns")
-    p_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated supermatrix")
-    p_mt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
+    p_mt.add_argument(
+        "--run-ml",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run IQ-TREE on concatenated supermatrix (default: on)",
+    )
+    p_mt.add_argument("--ufboot", type=int, default=100, help="Ultrafast bootstrap replicate number (fast mtBlocks default)")
     p_mt.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
-    p_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_mt.add_argument("--model", default="GTR+G", help="Model option passed to iqtree -m")
     p_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_mt.set_defaults(func=cmd_mt_blocks)
 
@@ -5090,28 +5106,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --cp-exclude-ref: only exclude contigs whose chloroplast hit covers at least this fraction of the contig",
     )
     p_ch_mt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
-    p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
+    p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph / LCB generation stage")
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
-    p_ch_mt.add_argument("--pangraph-args", nargs="*", default=[], help="Arguments passed to PanGraph")
+    p_ch_mt.add_argument("--pangraph-args", nargs="*", default=[], help="Arguments passed to PanGraph / LCB export workflow")
     p_ch_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON for mtBlocks")
-    p_ch_mt.add_argument("--run-panman", action="store_true", help="Run panman to derive conserved blocks")
-    p_ch_mt.add_argument("--aln-file", help="Existing MSA fasta for mtBlocks")
-    p_ch_mt.add_argument("--guide-tree", help="Existing guide tree nwk for mtBlocks")
-    p_ch_mt.add_argument("--dipper-graph", help="Expected dipper graph path")
-    p_ch_mt.add_argument("--run-dipper", action="store_true", help="Run DIPPER before TWILIGHT/panman")
-    p_ch_mt.add_argument("--dipper-bin", default="dipper", help="DIPPER executable")
-    p_ch_mt.add_argument("--dipper-args", nargs="*", default=[], help="Arguments passed to DIPPER")
-    p_ch_mt.add_argument("--run-twilight", action="store_true", help="Run TWILIGHT to generate guide tree")
-    p_ch_mt.add_argument("--twilight-bin", default="twilight", help="TWILIGHT executable")
-    p_ch_mt.add_argument("--twilight-args", nargs="*", default=[], help="Arguments passed to TWILIGHT")
-    p_ch_mt.add_argument("--panman-bin", default="panmanUtils", help="panman executable")
-    p_ch_mt.add_argument(
-        "--panman-args",
-        nargs="*",
-        default=[],
-        help="Arguments passed directly to panmanUtils",
-    )
-    p_ch_mt.add_argument("--blocks-dir", help="Existing panman blocks dir")
+    p_ch_mt.add_argument("--blocks-dir", help="Existing Pangraph-derived LCB/block FASTA directory for mtBlocks")
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_ch_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
@@ -5134,10 +5133,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ch_mt.add_argument("--block-min-samples", type=int, default=2, help="Skip blocks with fewer than this many samples")
     p_ch_mt.add_argument("--block-min-sites", type=int, default=1, help="Skip blocks with fewer than this many final alignment columns")
-    p_ch_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated blocks")
-    p_ch_mt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
+    p_ch_mt.add_argument(
+        "--run-ml",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run IQ-TREE on concatenated mtBlocks supermatrix (default: on)",
+    )
+    p_ch_mt.add_argument("--ufboot", type=int, default=100, help="Ultrafast bootstrap replicate number (fast mtBlocks default)")
     p_ch_mt.add_argument("--ml-threads", default="AUTO", help="Thread setting passed to iqtree -T")
-    p_ch_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_ch_mt.add_argument("--model", default="GTR+G", help="Model option passed to iqtree -m")
     p_ch_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_ch_mt.set_defaults(func=cmd_channel_plant_mt)
 

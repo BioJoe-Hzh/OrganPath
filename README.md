@@ -278,7 +278,7 @@ Three organelle channels:
 # Plant chloroplast channel
 OrganPath plant_pt -i reads_dir -o out_pt -s seed_pt.fa --jobs 5 --threads 16
 
-# Plant mitochondrial channel (PanGraph -> panmanUtils with your guide tree)
+# Plant mitochondrial channel (sortOrgan -> Pangraph LCBs -> mtBlocks tree)
 OrganPath plant_mt \
   -i reads_dir \
   -o out_mt \
@@ -287,9 +287,7 @@ OrganPath plant_mt \
   --threads 16 \
   --run-pangraph \
   --pangraph-args <PANGRAPH_ARGS...> \
-  --guide-tree your_tree.nwk \
-  --run-panman \
-  --panman-args <PANMAN_ARGS...>
+  --blocks-dir <LCB_FASTA_DIR_OR_PANGRAPH_OUTPUT_DIR>
 
 # Animal mitochondrial channel (simpler direct alignment route)
 OrganPath animal_mt -i reads_dir -o out_animal_mt -s seed_animal_mt.fa --jobs 5 --threads 16 --run-ml
@@ -396,15 +394,15 @@ OrganPath RenameTree \
 `mtBlocks` now supports this order:
 1. Read `sortOrgan` output directory or mt multifasta input
 2. PanGraph: build pangenome graph (`pangraph_output.json`)
-3. panmanUtils: derive homologous local blocks / LCB-like block FASTAs
+3. Obtain homologous local blocks / LCB-like FASTAs from the Pangraph workflow
 4. Collapse multiple records from the same sample within each block
 5. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
 6. concatenate all kept blocks to `mt_supermatrix.fasta` (`mt_partitions.txt`)
-7. optional IQ-TREE on the concatenated supermatrix
+7. IQ-TREE on the concatenated supermatrix to generate a fast guide tree for downstream `OrganPath panman`
 
 This is the recommended plant mitochondrial route:
 - keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
-- let PanGraph/panman find homologous blocks directly from those contigs
+- let PanGraph derive homologous blocks directly from those contigs
 - align each block separately and concatenate only after block detection
 
 Example:
@@ -415,47 +413,21 @@ OrganPath mtBlocks \
   -o out_mt/mtBlocks \
   --run-pangraph \
   --pangraph-args <PANGRAPH_ARGS...> \
-  --guide-tree your_tree.nwk \
-  --run-panman \
-  --panman-args <PANMAN_ARGS...> \
+  --blocks-dir <LCB_FASTA_DIR_OR_PANGRAPH_OUTPUT_DIR> \
   --block-jobs 8 \
   --block-sample-gap-n 100 \
   --block-max-missing-frac 0.2 \
-  --block-min-sites 50
+  --block-min-sites 50 \
+  --run-ml
 ```
 
 Legacy multifasta input is still accepted, but directory input is preferred because it preserves each sample's separate mt contigs.
 
-Older extended route with optional DIPPER/TWILIGHT is still supported:
-
-```bash
-OrganPath mtBlocks \
-  -i out_mt/sortOrgan \
-  -o out_mt/mtBlocks \
-  --run-pangraph \
-  --pangraph-args <PANGRAPH_ARGS...> \
-  --run-dipper \
-  --dipper-args <DIPPER_ARGS...> \
-  --run-twilight \
-  --twilight-args <TWILIGHT_ARGS...> \
-  --run-panman \
-  --panman-args <PANMAN_ARGS...> \
-  --block-jobs 8 \
-  --block-max-missing-frac 0.2 \
-  --block-min-sites 50
-```
-
-Argument placeholders supported in `--pangraph-args/--dipper-args/--twilight-args/--panman-args`:
+Argument placeholders supported in `--pangraph-args`:
 - `{input_fasta}`: input multifasta
 - `{pangraph_out}`: PanGraph working directory
 - `{pangraph_json}`: PanGraph JSON path (default: `pangraph/pangraph_output.json`)
-- `{dipper_out}`: DIPPER working directory
-- `{dipper_graph}`: expected graph path (default: `dipper/graph.gfa`)
-- `{aln_fasta}`: alignment file used downstream
-- `{twilight_out}`: TWILIGHT working directory
-- `{guide_tree}`: guide tree path (default: `twilight/guide_tree.nwk`)
-- `{panman_out}`: panman working directory
-- `{panman_file}`: default panman output path (`panman_run/result.panman`)
+- `{blocks_dir}`: directory where Pangraph-derived LCB/block FASTAs should be written
 
 Useful `mtBlocks` block filters:
 - `--block-jobs`: parallelize per-block MAFFT/trim/filter
@@ -467,3 +439,6 @@ Useful `mtBlocks` block filters:
 
 `mtblocks_summary.tsv` now records raw block record count, aligned/trimmed/final block length,
 final missing fraction, kept output fasta, and skip/fail reason for each block.
+Final primary outputs are:
+- `mt_supermatrix.fasta`
+- `mtblocks.treefile` (copied from IQ-TREE output when `--run-ml` is enabled)
