@@ -70,20 +70,25 @@ OrganPath sortOrgan \
   -o sortorgan_out \
   -s seed.fa \
   --organelle-mode plant_mt \
-  --min-identity 0.95 \
-  --min-len 1000 \
+  --cp-exclude-ref cp_ref.fa \
+  --cp-exclude-min-identity 0.98 \
+  --cp-exclude-min-len 5000 \
+  --cp-exclude-min-query-cov 0.8 \
+  --min-identity 0.90 \
+  --min-len 3000 \
   --min-non-n-len 8000
 ```
 
 `--organelle-mode` strategies:
 - `plant_pt`: chloroplast-oriented sorting; output is rotated to seed start/orientation.
 - `plant_mt`: mitochondrial homolog filtering against seed (reduce nuclear contamination).
+  You can also provide `--cp-exclude-ref` to remove large chloroplast-like contigs while keeping short plastid-derived transfers.
 - `animal_mt`: mitochondrial sorting with seed-start rotation for consistent coordinates.
 - `generic`: original contig-order behavior.
 
 Built-in default profile by type (`min_identity / min_len / gap_n`):
 - `plant_pt`: `0.95 / 1000 / 100`
-- `plant_mt`: `0.95 / 3000 / 100`
+- `plant_mt`: `0.90 / 3000 / 100`
 - `animal_mt`: `0.95 / 1000 / 100`
 - `generic`: `0.95 / 1000 / 100`
 
@@ -126,6 +131,13 @@ Outputs:
 
 `--min-non-n-len` only controls whether a sample is included in `assembled_samples.fasta`.
 Per-sample fasta is still written, and summary marks filtered rows as `FILTERED` with `non_n_len`.
+
+For `plant_mt`, chloroplast exclusion is optional and conservative:
+- `--cp-exclude-ref`: chloroplast reference fasta used only for exclusion checking
+- `--cp-exclude-min-identity`: default `0.98`
+- `--cp-exclude-min-len`: default `5000`, so only larger cp-like alignments are considered for exclusion
+- `--cp-exclude-min-query-cov`: default `0.8`, so the cp hit must cover most of the contig
+- short cp-derived inserts are therefore kept by default, reducing the chance of removing intracellular plastid transfer fragments
 
 Step 3 (Panel): Align and trim multifasta:
 
@@ -382,7 +394,7 @@ OrganPath RenameTree \
 1. PanGraph: build pangenome graph (`pangraph_output.json`)
 2. DIPPER and/or TWILIGHT: build alignment/guide tree (user-defined args)
 3. panmanUtils: derive homologous local blocks
-4. per-block `mafft` + `trimal`
+4. per-block `mafft` + `trimal` + optional site filtering
 5. concatenate all kept blocks to `mt_supermatrix.fasta` (`mt_partitions.txt`)
 
 Example:
@@ -398,7 +410,10 @@ OrganPath mtBlocks \
   --run-twilight \
   --twilight-args <TWILIGHT_ARGS...> \
   --run-panman \
-  --panman-args <PANMAN_ARGS...>
+  --panman-args <PANMAN_ARGS...> \
+  --block-jobs 8 \
+  --block-max-missing-frac 0.2 \
+  --block-min-sites 50
 ```
 
 Argument placeholders supported in `--pangraph-args/--dipper-args/--twilight-args/--panman-args`:
@@ -412,3 +427,13 @@ Argument placeholders supported in `--pangraph-args/--dipper-args/--twilight-arg
 - `{guide_tree}`: guide tree path (default: `twilight/guide_tree.nwk`)
 - `{panman_out}`: panman working directory
 - `{panman_file}`: default panman output path (`panman_run/result.panman`)
+
+Useful `mtBlocks` block filters:
+- `--block-jobs`: parallelize per-block MAFFT/trim/filter
+- `--block-max-missing-frac`: drop highly-missing columns within each block after trim
+- `--block-snp-only`: keep SNP columns only within each block
+- `--block-min-samples`: skip blocks with too few sequences
+- `--block-min-sites`: skip blocks that are too short after trim/filter
+
+`mtblocks_summary.tsv` now records raw sample count, aligned/trimmed/final block length,
+final missing fraction, kept output fasta, and skip/fail reason for each block.

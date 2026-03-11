@@ -1903,7 +1903,10 @@ def build_sample_assembly_from_contigs(
     pt_complete_min_frac: float = 0.85,
     seed_len: int = 0,
     seed_parts: Optional[Dict[str, str]] = None,
-    orient_min_query_cov: float = 0.6,
+    cp_exclude_ref: Optional[Path] = None,
+    cp_exclude_min_identity: float = 0.98,
+    cp_exclude_min_len: int = 5000,
+    cp_exclude_min_query_cov: float = 0.8,
 ) -> Tuple[str, int, int, str, Optional[Dict[str, str]]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
@@ -1927,7 +1930,35 @@ def build_sample_assembly_from_contigs(
     if organelle_mode == "plant_mt" and len(chosen) > 1:
         order = {cid: i for i, cid in enumerate(contigs.keys())}
         chosen.sort(key=lambda x: order.get(x[0], 10**9))
+    cp_excluded_notes: List[str] = []
+    if organelle_mode == "plant_mt" and cp_exclude_ref is not None and chosen:
+        cp_hits, _cp_tool = map_hits_for_candidate(
+            contig_fa=contig_fa,
+            seed_fa=cp_exclude_ref,
+            min_identity=cp_exclude_min_identity,
+            min_len=cp_exclude_min_len,
+            aligner=aligner,
+            tmp_prefix=out_dir / f"{sample_name}.cp_exclude",
+        )
+        cp_hit_map = {h[0]: h for h in cp_hits}
+        filtered_chosen = []
+        for h in chosen:
+            contig_id = h[0]
+            cp_hit = cp_hit_map.get(contig_id)
+            if cp_hit is None:
+                filtered_chosen.append(h)
+                continue
+            cp_qcov = (abs(cp_hit[7] - cp_hit[6]) + 1) / max(len(contigs.get(contig_id, "")), 1)
+            if cp_qcov >= cp_exclude_min_query_cov:
+                cp_excluded_notes.append(
+                    f"{contig_id}:cp_len={cp_hit[5]},cp_ident={cp_hit[4]:.3f},cp_qcov={cp_qcov:.3f}"
+                )
+                continue
+            filtered_chosen.append(h)
+        chosen = filtered_chosen
     if not chosen:
+        if organelle_mode == "plant_mt" and cp_exclude_ref is not None:
+            raise ValueError("No contigs left after chloroplast-like contig exclusion.")
         raise ValueError("No contigs passed identity/length filter against seed.")
 
     # Plant chloroplast specialized flow:
@@ -2015,8 +2046,7 @@ def build_sample_assembly_from_contigs(
                         continue
                     # Keep only mapped query segment to reduce non-organelle flanking sequence.
                     cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
-                    qcov = (abs(qend - qstart) + 1) / max(len(contigs.get(cid, "")), 1)
-                    if strand == "-" and qcov >= orient_min_query_cov:
+                    if strand == "-":
                         cseq = reverse_complement(cseq)
                     region_seq_parts.append(cseq)
                     covered += max(send - sstart + 1, 0)
@@ -2064,8 +2094,7 @@ def build_sample_assembly_from_contigs(
             cseq = contigs[contig_id]
             if organelle_mode != "plant_mt":
                 cseq = slice_query_segment(cseq, qstart=qstart, qend=qend, one_based=True)
-            qcov = (abs(qend - qstart) + 1) / max(len(contigs[contig_id]), 1)
-            if strand == "-" and qcov >= orient_min_query_cov:
+            if strand == "-":
                 cseq = reverse_complement(cseq)
             seq_parts.append(cseq)
             tab.write(f"{contig_id}\t{sstart}\t{send}\t{strand}\t{ident:.4f}\t{alen}\n")
@@ -2075,6 +2104,8 @@ def build_sample_assembly_from_contigs(
     note = "-"
     if organelle_mode == "plant_mt":
         note = "orientation_only:no_seed_reorder"
+        if cp_excluded_notes:
+            note += ";cp_excluded:" + ",".join(cp_excluded_notes)
     if organelle_mode in {"plant_pt", "animal_mt"} and seed_seq:
         merged, orient = rotate_sequence_to_seed_start(merged, seed_seq=seed_seq)
         note = f"rotated:{orient}"
@@ -2095,10 +2126,15 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"input-dir not found: {in_dir}")
     if not seed.exists():
         raise FileNotFoundError(f"seed fasta not found: {seed}")
-    if not (0.0 <= args.orient_min_query_cov <= 1.0):
-        raise ValueError("--orient-min-query-cov must be within [0,1]")
+    if not (0.0 <= args.cp_exclude_min_query_cov <= 1.0):
+        raise ValueError("--cp-exclude-min-query-cov must be within [0,1]")
     out_dir.mkdir(parents=True, exist_ok=True)
     seed_seq = read_primary_fasta_sequence(seed)
+    cp_exclude_ref: Optional[Path] = None
+    if args.cp_exclude_ref:
+        cp_exclude_ref = Path(args.cp_exclude_ref).resolve()
+        if not cp_exclude_ref.exists():
+            raise FileNotFoundError(f"chloroplast reference not found: {cp_exclude_ref}")
     prof = ORG_SORT_DEFAULTS.get(args.organelle_mode, ORG_SORT_DEFAULTS["generic"])
     min_identity = args.min_identity if args.min_identity is not None else prof["min_identity"]
     min_len = args.min_len if args.min_len is not None else prof["min_len"]
@@ -2236,7 +2272,10 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 pt_complete_min_frac=args.pt_complete_min_frac,
                 seed_len=len(seed_seq),
                 seed_parts=seed_parts,
-                orient_min_query_cov=args.orient_min_query_cov,
+                cp_exclude_ref=cp_exclude_ref,
+                cp_exclude_min_identity=args.cp_exclude_min_identity,
+                cp_exclude_min_len=args.cp_exclude_min_len,
+                cp_exclude_min_query_cov=args.cp_exclude_min_query_cov,
             )
             seqs = read_fasta_sequences(Path(out_fa))
             seq_non_n = max((non_n_length(seq) for seq in seqs.values()), default=0)
@@ -2367,6 +2406,113 @@ def align_trim_one_block(block_fa: Path, out_dir: Path, mafft_bin: str, trimal_b
     run_command([mafft_bin, "--auto", str(block_fa)], stdout_path=aln)
     run_command([trimal_bin, "-automated1", "-in", str(aln), "-out", str(trimmed)])
     return trimmed
+
+
+def summarize_alignment_missing(path: Path) -> Tuple[int, int, float]:
+    seqs = read_fasta_sequences(path)
+    if not seqs:
+        return 0, 0, 1.0
+    lengths = {len(v) for v in seqs.values()}
+    if len(lengths) != 1:
+        raise ValueError(f"Alignment has inconsistent sequence lengths: {path}")
+    sample_count = len(seqs)
+    aln_len = next(iter(lengths))
+    total_cells = sample_count * aln_len
+    non_missing = sum(
+        1
+        for seq in seqs.values()
+        for b in seq.upper()
+        if b in {"A", "C", "G", "T"}
+    )
+    missing_frac = 1.0 - (non_missing / total_cells) if total_cells > 0 else 1.0
+    return sample_count, aln_len, missing_frac
+
+
+def process_mt_block(
+    block_fa: Path,
+    out_dir: Path,
+    mafft_bin: str,
+    trimal_bin: str,
+    max_missing_frac: float,
+    snp_only: bool,
+    min_samples: int,
+    min_sites: int,
+) -> Dict[str, object]:
+    result: Dict[str, object] = {
+        "block_file": str(block_fa),
+        "status": "FAIL",
+        "raw_samples": 0,
+        "aligned_len": 0,
+        "trimmed_len": 0,
+        "kept_sites": 0,
+        "final_samples": 0,
+        "final_len": 0,
+        "final_missing_frac": 1.0,
+        "trimmed_block": "-",
+        "message": "-",
+    }
+
+    seqs = read_fasta_sequences(block_fa)
+    result["raw_samples"] = len(seqs)
+    if len(seqs) < min_samples:
+        result["status"] = "SKIP"
+        result["message"] = f"too_few_samples<{min_samples}"
+        return result
+
+    aln = out_dir / f"{block_fa.stem}.aln.fasta"
+    trimmed = out_dir / f"{block_fa.stem}.trim.fasta"
+    final_block = out_dir / f"{block_fa.stem}.final.fasta"
+
+    try:
+        run_command([mafft_bin, "--auto", str(block_fa)], stdout_path=aln)
+        run_command([trimal_bin, "-automated1", "-in", str(aln), "-out", str(trimmed)])
+        _aligned_samples, aligned_len, _aligned_missing = summarize_alignment_missing(aln)
+        trimmed_samples, trimmed_len, _trimmed_missing = summarize_alignment_missing(trimmed)
+        result["aligned_len"] = aligned_len
+        result["trimmed_len"] = trimmed_len
+        result["final_samples"] = trimmed_samples
+
+        if max_missing_frac < 1.0 or snp_only:
+            kept_sites, _total_sites = filter_alignment_sites(
+                in_fa=trimmed,
+                out_fa=final_block,
+                max_missing_frac=max_missing_frac,
+                snp_only=snp_only,
+            )
+            result["kept_sites"] = kept_sites
+        else:
+            shutil.copyfile(trimmed, final_block)
+            result["kept_sites"] = trimmed_len
+
+        final_samples, final_len, final_missing_frac = summarize_alignment_missing(final_block)
+        result["final_samples"] = final_samples
+        result["final_len"] = final_len
+        result["final_missing_frac"] = final_missing_frac
+        result["trimmed_block"] = str(final_block)
+
+        if final_len < min_sites:
+            result["status"] = "SKIP"
+            result["message"] = f"too_few_sites<{min_sites}"
+            return result
+
+        if final_samples < min_samples:
+            result["status"] = "SKIP"
+            result["message"] = f"too_few_samples_after_trim<{min_samples}"
+            return result
+
+        result["status"] = "OK"
+        result["message"] = "-"
+        return result
+    except ValueError as exc:
+        if "No alignment columns left after filtering" in str(exc):
+            result["status"] = "SKIP"
+            result["message"] = "no_sites_left_after_filter"
+            return result
+        result["message"] = str(exc).replace(chr(9), " ")
+        return result
+    except Exception as exc:
+        result["message"] = str(exc).replace(chr(9), " ")
+        return result
 
 
 def concatenate_blocks(trimmed_blocks: List[Path], out_fa: Path, out_partitions: Path) -> None:
@@ -2547,6 +2693,12 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     if not input_fa.exists():
         raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
+    if not (0.0 <= args.block_max_missing_frac <= 1.0):
+        raise ValueError("--block-max-missing-frac must be within [0,1]")
+    if args.block_min_samples < 2:
+        raise ValueError("--block-min-samples must be >= 2")
+    if args.block_min_sites < 1:
+        raise ValueError("--block-min-sites must be >= 1")
 
     paths = run_panman_pipeline(args, input_fa=input_fa, out_dir=out_dir, strict_args=True)
     blocks_dir = paths["blocks_dir"]
@@ -2563,18 +2715,55 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     aln_dir.mkdir(parents=True, exist_ok=True)
 
     trimmed_blocks: List[Path] = []
+    block_results: List[Dict[str, object]] = []
+    workers = max(1, min(int(args.block_jobs), len(block_fastas)))
     with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
-        sumf.write("block_file\tstatus\ttrimmed_block\n")
-        for bf in block_fastas:
-            try:
-                trimmed = align_trim_one_block(bf, aln_dir, mafft_bin=mafft_bin, trimal_bin=trimal_bin)
-                if trimmed is None:
-                    sumf.write(f"{bf}\tSKIP\t-\n")
-                    continue
-                trimmed_blocks.append(trimmed)
-                sumf.write(f"{bf}\tOK\t{trimmed}\n")
-            except Exception:
-                sumf.write(f"{bf}\tFAIL\t-\n")
+        sumf.write(
+            "block_file\tstatus\traw_samples\taligned_len\ttrimmed_len\tkept_sites\t"
+            "final_samples\tfinal_len\tfinal_missing_frac\ttrimmed_block\tmessage\n"
+        )
+        if workers == 1:
+            block_results = [
+                process_mt_block(
+                    bf,
+                    aln_dir,
+                    mafft_bin=mafft_bin,
+                    trimal_bin=trimal_bin,
+                    max_missing_frac=args.block_max_missing_frac,
+                    snp_only=args.block_snp_only,
+                    min_samples=args.block_min_samples,
+                    min_sites=args.block_min_sites,
+                )
+                for bf in block_fastas
+            ]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = [
+                    ex.submit(
+                        process_mt_block,
+                        bf,
+                        aln_dir,
+                        mafft_bin,
+                        trimal_bin,
+                        args.block_max_missing_frac,
+                        args.block_snp_only,
+                        args.block_min_samples,
+                        args.block_min_sites,
+                    )
+                    for bf in block_fastas
+                ]
+                for fut in concurrent.futures.as_completed(futs):
+                    block_results.append(fut.result())
+
+        for rec in sorted(block_results, key=lambda x: str(x["block_file"])):
+            if str(rec["status"]) == "OK" and str(rec["trimmed_block"]) != "-":
+                trimmed_blocks.append(Path(str(rec["trimmed_block"])))
+            sumf.write(
+                f"{rec['block_file']}\t{rec['status']}\t{rec['raw_samples']}\t"
+                f"{rec['aligned_len']}\t{rec['trimmed_len']}\t{rec['kept_sites']}\t"
+                f"{rec['final_samples']}\t{rec['final_len']}\t{float(rec['final_missing_frac']):.4f}\t"
+                f"{rec['trimmed_block']}\t{rec['message']}\n"
+            )
 
     supermatrix = out_dir / "mt_supermatrix.fasta"
     partitions = out_dir / "mt_partitions.txt"
@@ -2628,8 +2817,11 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_pt,
         gap_n=args.gap_n,
-        orient_min_query_cov=args.orient_min_query_cov,
         min_non_n_len=args.min_non_n_len,
+        cp_exclude_ref=None,
+        cp_exclude_min_identity=0.98,
+        cp_exclude_min_len=5000,
+        cp_exclude_min_query_cov=0.8,
     )
     return cmd_sort_organ(ss)
 
@@ -2668,8 +2860,11 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
-        orient_min_query_cov=args.orient_min_query_cov,
         min_non_n_len=args.min_non_n_len,
+        cp_exclude_ref=args.cp_exclude_ref,
+        cp_exclude_min_identity=args.cp_exclude_min_identity,
+        cp_exclude_min_len=args.cp_exclude_min_len,
+        cp_exclude_min_query_cov=args.cp_exclude_min_query_cov,
     )
     cmd_sort_organ(ss)
 
@@ -2695,6 +2890,11 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         panman_args=args.panman_args,
         mafft_bin=args.mafft_bin,
         trimal_bin=args.trimal_bin,
+        block_jobs=args.block_jobs,
+        block_max_missing_frac=args.block_max_missing_frac,
+        block_snp_only=args.block_snp_only,
+        block_min_samples=args.block_min_samples,
+        block_min_sites=args.block_min_sites,
         run_ml=args.run_ml,
         ufboot=args.ufboot,
         threads=args.ml_threads,
@@ -2738,8 +2938,11 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         min_identity=args.min_identity,
         min_len=args.min_len_mt,
         gap_n=args.gap_n,
-        orient_min_query_cov=args.orient_min_query_cov,
         min_non_n_len=args.min_non_n_len,
+        cp_exclude_ref=None,
+        cp_exclude_min_identity=0.98,
+        cp_exclude_min_len=5000,
+        cp_exclude_min_query_cov=0.8,
     )
     cmd_sort_organ(ss)
 
@@ -4529,10 +4732,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument("--min-len", type=int, default=None, help="Minimum aligned length (default by --organelle-mode)")
     p_sort.add_argument("--gap-n", type=int, default=None, help="Number of Ns between selected contigs (default by --organelle-mode)")
     p_sort.add_argument(
-        "--orient-min-query-cov",
+        "--cp-exclude-ref",
+        help="Optional chloroplast reference fasta. In plant_mt mode, contigs with large high-coverage cp hits are excluded.",
+    )
+    p_sort.add_argument(
+        "--cp-exclude-min-identity",
         type=float,
-        default=0.6,
-        help="Minimum query coverage fraction of blast hit required to apply reverse-complement orientation",
+        default=0.98,
+        help="With --cp-exclude-ref: minimum chloroplast-hit identity used for exclusion",
+    )
+    p_sort.add_argument(
+        "--cp-exclude-min-len",
+        type=int,
+        default=5000,
+        help="With --cp-exclude-ref: only exclude contigs with chloroplast hit length >= this value",
+    )
+    p_sort.add_argument(
+        "--cp-exclude-min-query-cov",
+        type=float,
+        default=0.8,
+        help="With --cp-exclude-ref: only exclude contigs whose chloroplast hit covers at least this fraction of the contig",
     )
     p_sort.add_argument(
         "--min-non-n-len",
@@ -4646,6 +4865,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
+    p_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
+    p_mt.add_argument(
+        "--block-max-missing-frac",
+        type=float,
+        default=1.0,
+        help="Per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
+    )
+    p_mt.add_argument(
+        "--block-snp-only",
+        action="store_true",
+        help="Per-block post-trim site filter: keep SNP columns only",
+    )
+    p_mt.add_argument("--block-min-samples", type=int, default=2, help="Skip blocks with fewer than this many samples")
+    p_mt.add_argument("--block-min-sites", type=int, default=1, help="Skip blocks with fewer than this many final alignment columns")
     p_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated supermatrix")
     p_mt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     p_mt.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
@@ -4673,7 +4906,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_pt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_pt.add_argument("--min-len-pt", type=int, default=1000, help="Minimum length for cp contig selection (default: 1000)")
     p_ch_pt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
-    p_ch_pt.add_argument("--orient-min-query-cov", type=float, default=0.6, help="Minimum blast query coverage to apply reverse-complement orientation")
     p_ch_pt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_pt.add_argument(
         "--pt-single-ir",
@@ -4709,7 +4941,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--min-identity", type=float, default=0.90, help="Minimum identity for contig selection (default: 0.90)")
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection (default: 3000)")
     p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
-    p_ch_mt.add_argument("--orient-min-query-cov", type=float, default=0.6, help="Minimum blast query coverage to apply reverse-complement orientation")
+    p_ch_mt.add_argument(
+        "--cp-exclude-ref",
+        help="Optional chloroplast reference fasta. Large chloroplast-like contigs will be excluded from plant_mt assemblies.",
+    )
+    p_ch_mt.add_argument(
+        "--cp-exclude-min-identity",
+        type=float,
+        default=0.98,
+        help="With --cp-exclude-ref: minimum chloroplast-hit identity used for exclusion",
+    )
+    p_ch_mt.add_argument(
+        "--cp-exclude-min-len",
+        type=int,
+        default=5000,
+        help="With --cp-exclude-ref: only exclude contigs with chloroplast hit length >= this value",
+    )
+    p_ch_mt.add_argument(
+        "--cp-exclude-min-query-cov",
+        type=float,
+        default=0.8,
+        help="With --cp-exclude-ref: only exclude contigs whose chloroplast hit covers at least this fraction of the contig",
+    )
     p_ch_mt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
@@ -4735,6 +4988,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--blocks-dir", help="Existing panman blocks dir")
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
+    p_ch_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
+    p_ch_mt.add_argument(
+        "--block-max-missing-frac",
+        type=float,
+        default=1.0,
+        help="Per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
+    )
+    p_ch_mt.add_argument(
+        "--block-snp-only",
+        action="store_true",
+        help="Per-block post-trim site filter: keep SNP columns only",
+    )
+    p_ch_mt.add_argument("--block-min-samples", type=int, default=2, help="Skip blocks with fewer than this many samples")
+    p_ch_mt.add_argument("--block-min-sites", type=int, default=1, help="Skip blocks with fewer than this many final alignment columns")
     p_ch_mt.add_argument("--run-ml", action="store_true", help="Run ML tree on concatenated blocks")
     p_ch_mt.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number")
     p_ch_mt.add_argument("--ml-threads", default="AUTO", help="Thread setting passed to iqtree -T")
@@ -4762,7 +5029,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_amt.add_argument("--min-identity", type=float, default=0.95, help="Minimum identity for contig selection (default: 0.95)")
     p_ch_amt.add_argument("--min-len-mt", type=int, default=1000, help="Minimum length for mt contig selection (default: 1000)")
     p_ch_amt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
-    p_ch_amt.add_argument("--orient-min-query-cov", type=float, default=0.6, help="Minimum blast query coverage to apply reverse-complement orientation")
     p_ch_amt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_amt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_amt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
