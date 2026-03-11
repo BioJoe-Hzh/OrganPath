@@ -276,6 +276,13 @@ def make_contig_record_id(sample_name: str, contig_id: str, rank: int) -> str:
     return f"{safe_filename(sample_name)}__c{rank:03d}__{safe_filename(contig_id)}"
 
 
+def sample_name_from_contig_record_id(record_id: str) -> str:
+    m = re.match(r"^(.+?)__c\d+__", record_id)
+    if m:
+        return m.group(1)
+    return record_id
+
+
 def write_name_map(path: Path, samples: List[str], name_map: Dict[str, str], mode: str) -> None:
     with path.open("wt") as out:
         out.write(f"# mode={mode}\n")
@@ -2415,6 +2422,60 @@ def list_block_fastas(blocks_dir: Path) -> List[Path]:
     return files
 
 
+def prepare_mtblocks_input_from_sortorgan(sortorgan_dir: Path, out_dir: Path) -> Tuple[Path, Dict[str, str], Path]:
+    combined = out_dir / "mtblocks_input.fasta"
+    mapping_tsv = out_dir / "mtblocks_input.sample_map.tsv"
+    sample_map: Dict[str, str] = {}
+    sample_dirs = sorted(p for p in sortorgan_dir.iterdir() if p.is_dir())
+    written = 0
+
+    with combined.open("wt") as out, mapping_tsv.open("wt") as mp:
+        mp.write("record_id\tsample\torig_record_id\tsource_fasta\n")
+        for sdir in sample_dirs:
+            sample = sdir.name
+            organellar = sdir / f"{sample}.organellar.fasta"
+            if not organellar.exists():
+                continue
+            seqs = read_fasta_sequences(organellar)
+            for rank, (orig_id, seq) in enumerate(seqs.items(), start=1):
+                record_id = make_contig_record_id(sample, orig_id, rank)
+                out.write(f">{record_id}\n{seq}\n")
+                mp.write(f"{record_id}\t{sample}\t{orig_id}\t{organellar}\n")
+                sample_map[record_id] = sample
+                written += 1
+
+    if written == 0:
+        raise ValueError(f"No per-sample organellar FASTA files found in sortOrgan dir: {sortorgan_dir}")
+    return combined, sample_map, mapping_tsv
+
+
+def infer_mtblocks_sample_map_from_fasta(input_fa: Path) -> Dict[str, str]:
+    seqs = read_fasta_sequences(input_fa)
+    return {rid: sample_name_from_contig_record_id(rid) for rid in seqs}
+
+
+def collapse_block_to_sample_fasta(
+    block_fa: Path,
+    out_fa: Path,
+    sample_map: Dict[str, str],
+    sample_gap_n: int,
+) -> Tuple[int, int]:
+    seqs = read_fasta_sequences(block_fa)
+    grouped: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    for rid, seq in seqs.items():
+        sample = sample_map.get(rid, sample_name_from_contig_record_id(rid))
+        grouped[sample].append((rid, seq))
+
+    gap = "N" * max(0, sample_gap_n)
+    collapsed: Dict[str, str] = {}
+    for sample, items in grouped.items():
+        items.sort(key=lambda x: x[0])
+        collapsed[sample] = gap.join(seq for _rid, seq in items)
+
+    write_fasta_sequences(out_fa, collapsed)
+    return len(seqs), len(collapsed)
+
+
 def align_trim_one_block(block_fa: Path, out_dir: Path, mafft_bin: str, trimal_bin: str) -> Optional[Path]:
     seqs = read_fasta_sequences(block_fa)
     if len(seqs) < 2:
@@ -2451,6 +2512,8 @@ def process_mt_block(
     out_dir: Path,
     mafft_bin: str,
     trimal_bin: str,
+    sample_map: Dict[str, str],
+    sample_gap_n: int,
     max_missing_frac: float,
     snp_only: bool,
     min_samples: int,
@@ -2470,9 +2533,15 @@ def process_mt_block(
         "message": "-",
     }
 
-    seqs = read_fasta_sequences(block_fa)
-    result["raw_samples"] = len(seqs)
-    if len(seqs) < min_samples:
+    collapsed_in = out_dir / f"{block_fa.stem}.sample_input.fasta"
+    raw_records, collapsed_samples = collapse_block_to_sample_fasta(
+        block_fa=block_fa,
+        out_fa=collapsed_in,
+        sample_map=sample_map,
+        sample_gap_n=sample_gap_n,
+    )
+    result["raw_samples"] = raw_records
+    if collapsed_samples < min_samples:
         result["status"] = "SKIP"
         result["message"] = f"too_few_samples<{min_samples}"
         return result
@@ -2482,13 +2551,21 @@ def process_mt_block(
     final_block = out_dir / f"{block_fa.stem}.final.fasta"
 
     try:
-        run_command([mafft_bin, "--auto", str(block_fa)], stdout_path=aln)
+        run_alignment_with_direction(
+            multifasta=collapsed_in,
+            aligned=aln,
+            mafft_bin=mafft_bin,
+            adjust_direction=True,
+            threads="1",
+        )
         run_command([trimal_bin, "-automated1", "-in", str(aln), "-out", str(trimmed)])
         _aligned_samples, aligned_len, _aligned_missing = summarize_alignment_missing(aln)
         trimmed_samples, trimmed_len, _trimmed_missing = summarize_alignment_missing(trimmed)
         result["aligned_len"] = aligned_len
         result["trimmed_len"] = trimmed_len
         result["final_samples"] = trimmed_samples
+        if raw_records != collapsed_samples:
+            result["message"] = f"collapsed_records:{raw_records}->{collapsed_samples}"
 
         if max_missing_frac < 1.0 or snp_only:
             kept_sites, _total_sites = filter_alignment_sites(
@@ -2519,7 +2596,8 @@ def process_mt_block(
             return result
 
         result["status"] = "OK"
-        result["message"] = "-"
+        if result["message"] == "-":
+            result["message"] = "-"
         return result
     except ValueError as exc:
         if "No alignment columns left after filtering" in str(exc):
@@ -2706,17 +2784,26 @@ def cmd_panman(args: argparse.Namespace) -> int:
 
 
 def cmd_mt_blocks(args: argparse.Namespace) -> int:
-    input_fa = Path(args.input).resolve()
+    input_path = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    if not input_fa.exists():
-        raise FileNotFoundError(f"Input multifasta not found: {input_fa}")
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input not found: {input_path}")
     if not (0.0 <= args.block_max_missing_frac <= 1.0):
         raise ValueError("--block-max-missing-frac must be within [0,1]")
     if args.block_min_samples < 2:
         raise ValueError("--block-min-samples must be >= 2")
     if args.block_min_sites < 1:
         raise ValueError("--block-min-sites must be >= 1")
+
+    if input_path.is_dir():
+        input_fa, sample_map, sample_map_tsv = prepare_mtblocks_input_from_sortorgan(input_path, out_dir=out_dir)
+        logger.info("mtBlocks input detected as sortOrgan directory: %s", input_path)
+        logger.info("mtBlocks combined contig fasta: %s", input_fa)
+        logger.info("mtBlocks sample map: %s", sample_map_tsv)
+    else:
+        input_fa = input_path
+        sample_map = infer_mtblocks_sample_map_from_fasta(input_fa)
 
     paths = run_panman_pipeline(args, input_fa=input_fa, out_dir=out_dir, strict_args=True)
     blocks_dir = paths["blocks_dir"]
@@ -2747,6 +2834,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                     aln_dir,
                     mafft_bin=mafft_bin,
                     trimal_bin=trimal_bin,
+                    sample_map=sample_map,
+                    sample_gap_n=args.block_sample_gap_n,
                     max_missing_frac=args.block_max_missing_frac,
                     snp_only=args.block_snp_only,
                     min_samples=args.block_min_samples,
@@ -2763,6 +2852,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                         aln_dir,
                         mafft_bin,
                         trimal_bin,
+                        sample_map,
+                        args.block_sample_gap_n,
                         args.block_max_missing_frac,
                         args.block_snp_only,
                         args.block_min_samples,
@@ -2887,7 +2978,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
     cmd_sort_organ(ss)
 
     ms = argparse.Namespace(
-        input=str((Path(args.outdir).resolve() / "sortOrgan" / "assembled_samples.fasta")),
+        input=str((Path(args.outdir).resolve() / "sortOrgan")),
         outdir=str((Path(args.outdir).resolve() / "mtBlocks")),
         run_pangraph=args.run_pangraph,
         pangraph_bin=args.pangraph_bin,
@@ -2909,6 +3000,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         mafft_bin=args.mafft_bin,
         trimal_bin=args.trimal_bin,
         block_jobs=args.block_jobs,
+        block_sample_gap_n=args.block_sample_gap_n,
         block_max_missing_frac=args.block_max_missing_frac,
         block_snp_only=args.block_snp_only,
         block_min_samples=args.block_min_samples,
@@ -4748,7 +4840,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sort.add_argument("--pt-complete-min-frac", type=float, default=0.85, help="plant_pt complete mode: minimum fraction of expected one-IR length")
     p_sort.add_argument("--min-identity", type=float, default=None, help="Minimum alignment identity (default by --organelle-mode)")
     p_sort.add_argument("--min-len", type=int, default=None, help="Minimum aligned length (default by --organelle-mode)")
-    p_sort.add_argument("--gap-n", type=int, default=None, help="Number of Ns between selected contigs (default by --organelle-mode)")
+    p_sort.add_argument(
+        "--gap-n",
+        type=int,
+        default=None,
+        help="Number of Ns between selected contigs (default by --organelle-mode). Ignored in plant_mt multi-contig output mode.",
+    )
     p_sort.add_argument(
         "--cp-exclude-ref",
         help="Optional chloroplast reference fasta. In plant_mt mode, contigs with large high-coverage cp hits are excluded.",
@@ -4842,7 +4939,12 @@ def build_parser() -> argparse.ArgumentParser:
         "mtBlocks",
         help="Plant mitochondrial route: panman blocks -> block MAFFT+trimAl -> concatenated supermatrix",
     )
-    p_mt.add_argument("-i", "--input", required=True, help="Input multifasta (per-sample mt assemblies)")
+    p_mt.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input sortOrgan output directory or multifasta. Directory mode preserves per-sample multi-contig mt assemblies.",
+    )
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph before TWILIGHT/panman")
     p_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
@@ -4884,6 +4986,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
+    p_mt.add_argument(
+        "--block-sample-gap-n",
+        type=int,
+        default=100,
+        help="If one sample contributes multiple records to the same block, join them with this many Ns before MAFFT",
+    )
     p_mt.add_argument(
         "--block-max-missing-frac",
         type=float,
@@ -4958,7 +5066,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--aligner", default="auto", choices=["auto", "blastn"], help="Contig aligner")
     p_ch_mt.add_argument("--min-identity", type=float, default=0.90, help="Minimum identity for contig selection (default: 0.90)")
     p_ch_mt.add_argument("--min-len-mt", type=int, default=3000, help="Minimum length for mt contig selection (default: 3000)")
-    p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100)")
+    p_ch_mt.add_argument("--gap-n", type=int, default=100, help="Ns inserted between selected contigs (default: 100; ignored in plant_mt multi-contig output mode)")
     p_ch_mt.add_argument(
         "--cp-exclude-ref",
         help="Optional chloroplast reference fasta. Large chloroplast-like contigs will be excluded from plant_mt assemblies.",
@@ -5007,6 +5115,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_ch_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
+    p_ch_mt.add_argument(
+        "--block-sample-gap-n",
+        type=int,
+        default=100,
+        help="If one sample contributes multiple records to the same block, join them with this many Ns before MAFFT",
+    )
     p_ch_mt.add_argument(
         "--block-max-missing-frac",
         type=float,

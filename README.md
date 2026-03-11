@@ -84,6 +84,7 @@ OrganPath sortOrgan \
 - `plant_mt`: mitochondrial homolog filtering against seed (reduce nuclear contamination).
   You can also provide `--cp-exclude-ref` to remove large chloroplast-like contigs while keeping short plastid-derived transfers.
   Output keeps selected contigs as separate FASTA records per sample; contigs are not joined by `N`.
+  In this mode, `--gap-n` is ignored.
 - `animal_mt`: mitochondrial sorting with seed-start rotation for consistent coordinates.
 - `generic`: original contig-order behavior.
 
@@ -393,17 +394,43 @@ OrganPath RenameTree \
 ## Plant mtBlocks Workflow
 
 `mtBlocks` now supports this order:
-1. PanGraph: build pangenome graph (`pangraph_output.json`)
-2. DIPPER and/or TWILIGHT: build alignment/guide tree (user-defined args)
-3. panmanUtils: derive homologous local blocks
-4. per-block `mafft` + `trimal` + optional site filtering
-5. concatenate all kept blocks to `mt_supermatrix.fasta` (`mt_partitions.txt`)
+1. Read `sortOrgan` output directory or mt multifasta input
+2. PanGraph: build pangenome graph (`pangraph_output.json`)
+3. panmanUtils: derive homologous local blocks / LCB-like block FASTAs
+4. Collapse multiple records from the same sample within each block
+5. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
+6. concatenate all kept blocks to `mt_supermatrix.fasta` (`mt_partitions.txt`)
+7. optional IQ-TREE on the concatenated supermatrix
+
+This is the recommended plant mitochondrial route:
+- keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
+- let PanGraph/panman find homologous blocks directly from those contigs
+- align each block separately and concatenate only after block detection
 
 Example:
 
 ```bash
 OrganPath mtBlocks \
-  -i out_mt/sortOrgan/assembled_samples.fasta \
+  -i out_mt/sortOrgan \
+  -o out_mt/mtBlocks \
+  --run-pangraph \
+  --pangraph-args <PANGRAPH_ARGS...> \
+  --guide-tree your_tree.nwk \
+  --run-panman \
+  --panman-args <PANMAN_ARGS...> \
+  --block-jobs 8 \
+  --block-sample-gap-n 100 \
+  --block-max-missing-frac 0.2 \
+  --block-min-sites 50
+```
+
+Legacy multifasta input is still accepted, but directory input is preferred because it preserves each sample's separate mt contigs.
+
+Older extended route with optional DIPPER/TWILIGHT is still supported:
+
+```bash
+OrganPath mtBlocks \
+  -i out_mt/sortOrgan \
   -o out_mt/mtBlocks \
   --run-pangraph \
   --pangraph-args <PANGRAPH_ARGS...> \
@@ -432,10 +459,11 @@ Argument placeholders supported in `--pangraph-args/--dipper-args/--twilight-arg
 
 Useful `mtBlocks` block filters:
 - `--block-jobs`: parallelize per-block MAFFT/trim/filter
+- `--block-sample-gap-n`: if one sample contributes multiple records to the same block, join them with Ns before MAFFT
 - `--block-max-missing-frac`: drop highly-missing columns within each block after trim
 - `--block-snp-only`: keep SNP columns only within each block
 - `--block-min-samples`: skip blocks with too few sequences
 - `--block-min-sites`: skip blocks that are too short after trim/filter
 
-`mtblocks_summary.tsv` now records raw sample count, aligned/trimmed/final block length,
+`mtblocks_summary.tsv` now records raw block record count, aligned/trimmed/final block length,
 final missing fraction, kept output fasta, and skip/fail reason for each block.
