@@ -427,7 +427,8 @@ Legacy multifasta input is still accepted, but directory input is preferred beca
 
 Useful `mtBlocks` block filters:
 - `--sample-min-ref-cover-frac`: default `0.5`; pre-filter samples before Pangraph using `sortorgan_summary.tsv`
-- `--block-jobs`: parallelize per-block MAFFT/trim/filter
+- `--threads`: one unified thread setting; Pangraph uses it, mtBlocks block-parallelism inherits it by default, and IQ-TREE also uses it
+- `--block-jobs`: optional override for per-block MAFFT/trim/filter parallelism; default inherits from `--threads`
 - `--block-min-sample-frac`: default `0.5`; keep only blocks present in at least half the samples
 - `--block-max-missing-frac`: optional extra post-trim site filter; default is disabled so trimAl output is used directly
 - `--block-snp-only`: keep SNP columns only within each block

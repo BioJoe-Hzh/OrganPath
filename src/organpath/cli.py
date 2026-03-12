@@ -2841,9 +2841,14 @@ def run_mtblocks_pangraph_pipeline(args: argparse.Namespace, input_fa: Path, out
 
     if args.run_pangraph:
         blocks_dir.mkdir(parents=True, exist_ok=True)
+        pangraph_jobs: List[str] = []
+        t = str(args.threads).strip().upper()
+        if t != "AUTO":
+            pangraph_jobs = ["-j", str(args.threads)]
         run_command(
             [
                 pangraph_bin,
+                *pangraph_jobs,
                 "build",
                 "--circular",
                 "--output-json",
@@ -2854,6 +2859,7 @@ def run_mtblocks_pangraph_pipeline(args: argparse.Namespace, input_fa: Path, out
         run_command(
             [
                 pangraph_bin,
+                *pangraph_jobs,
                 "export",
                 "block-sequences",
                 "--output",
@@ -2937,7 +2943,10 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
 
     trimmed_blocks: List[Path] = []
     block_results: List[Dict[str, object]] = []
-    workers = max(1, min(int(args.block_jobs), len(block_fastas)))
+    block_jobs = int(args.block_jobs) if int(args.block_jobs) > 0 else (
+        1 if str(args.threads).strip().upper() == "AUTO" else int(args.threads)
+    )
+    workers = max(1, min(block_jobs, len(block_fastas)))
     with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
         sumf.write(
             "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\tconflicting_samples\t"
@@ -3118,7 +3127,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         block_min_sites=args.block_min_sites,
         run_ml=args.run_ml,
         ufboot=args.ufboot,
-        threads=args.ml_threads,
+        threads=args.threads,
         model=args.model,
         unsafe=args.unsafe,
     )
@@ -5074,7 +5083,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
-    p_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
+    p_mt.add_argument(
+        "--block-jobs",
+        type=int,
+        default=0,
+        help="Parallel jobs for per-block MAFFT/trim/filter; default inherits from --threads",
+    )
     p_mt.add_argument(
         "--block-max-missing-frac",
         type=float,
@@ -5200,7 +5214,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
-    p_ch_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
+    p_ch_mt.add_argument(
+        "--block-jobs",
+        type=int,
+        default=0,
+        help="Parallel jobs for per-block MAFFT/trim/filter; default inherits from --threads",
+    )
     p_ch_mt.add_argument(
         "--block-max-missing-frac",
         type=float,
@@ -5226,7 +5245,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run IQ-TREE on concatenated mtBlocks supermatrix (default: on)",
     )
     p_ch_mt.add_argument("--ufboot", type=int, default=1000, help="Ultrafast bootstrap replicate number")
-    p_ch_mt.add_argument("--ml-threads", default="AUTO", help="Thread setting passed to iqtree -T")
     p_ch_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
     p_ch_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_ch_mt.set_defaults(func=cmd_channel_plant_mt)
