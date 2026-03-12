@@ -423,8 +423,10 @@ Legacy multifasta input is still accepted, but directory input is preferred beca
 - `pangraph build --circular --output pangraph/pangraph_output.json`
 - `pangraph export block-sequences --output pangraph_blocks pangraph/pangraph_output.json`
 - by default this internal Pangraph step is on; you only need `--no-run-pangraph` if you already have `--pangraph-json` and/or `--blocks-dir`
+- in sortOrgan directory mode, samples are pre-filtered by `sortorgan_summary.tsv`; default keeps only `ref_covered_frac >= 0.5`
 
 Useful `mtBlocks` block filters:
+- `--sample-min-ref-cover-frac`: default `0.5`; pre-filter samples before Pangraph using `sortorgan_summary.tsv`
 - `--block-jobs`: parallelize per-block MAFFT/trim/filter
 - `--block-min-sample-frac`: default `0.5`; keep only blocks present in at least half the samples
 - `--block-max-missing-frac`: optional extra post-trim site filter; default is disabled so trimAl output is used directly

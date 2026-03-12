@@ -2422,17 +2422,50 @@ def list_block_fastas(blocks_dir: Path) -> List[Path]:
     return files
 
 
-def prepare_mtblocks_input_from_sortorgan(sortorgan_dir: Path, out_dir: Path) -> Tuple[Path, Dict[str, str], Path]:
+def load_sortorgan_sample_filter(summary_tsv: Path, min_ref_cover_frac: float) -> Dict[str, bool]:
+    keep: Dict[str, bool] = {}
+    if not summary_tsv.exists():
+        return keep
+    with summary_tsv.open("rt") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        idx = {name: i for i, name in enumerate(header)}
+        if "sample" not in idx or "ref_covered_frac" not in idx:
+            return keep
+        for raw in fh:
+            cols = raw.rstrip("\n").split("\t")
+            if len(cols) <= max(idx["sample"], idx["ref_covered_frac"]):
+                continue
+            sample = cols[idx["sample"]]
+            try:
+                ref_cov = float(cols[idx["ref_covered_frac"]])
+            except ValueError:
+                ref_cov = 0.0
+            keep[sample] = ref_cov >= min_ref_cover_frac
+    return keep
+
+
+def prepare_mtblocks_input_from_sortorgan(
+    sortorgan_dir: Path,
+    out_dir: Path,
+    min_ref_cover_frac: float,
+) -> Tuple[Path, Dict[str, str], Path]:
     combined = out_dir / "mtblocks_input.fasta"
     mapping_tsv = out_dir / "mtblocks_input.sample_map.tsv"
+    sample_filter_tsv = out_dir / "mtblocks_sample_filter.tsv"
     sample_map: Dict[str, str] = {}
     sample_dirs = sorted(p for p in sortorgan_dir.iterdir() if p.is_dir())
+    keep_map = load_sortorgan_sample_filter(sortorgan_dir / "sortorgan_summary.tsv", min_ref_cover_frac=min_ref_cover_frac)
     written = 0
 
-    with combined.open("wt") as out, mapping_tsv.open("wt") as mp:
+    with combined.open("wt") as out, mapping_tsv.open("wt") as mp, sample_filter_tsv.open("wt") as sf:
         mp.write("record_id\tsample\torig_record_id\tsource_fasta\n")
+        sf.write("sample\tkeep\tref_cover_rule\n")
         for sdir in sample_dirs:
             sample = sdir.name
+            keep_sample = keep_map.get(sample, True) if keep_map else True
+            sf.write(f"{sample}\t{'KEEP' if keep_sample else 'DROP'}\tref_covered_frac>={min_ref_cover_frac:.3f}\n")
+            if not keep_sample:
+                continue
             organellar = sdir / f"{sample}.organellar.fasta"
             if not organellar.exists():
                 continue
@@ -2869,11 +2902,17 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         raise ValueError("--block-max-missing-frac must be within [0,1]")
     if not (0.0 <= args.block_min_sample_frac <= 1.0):
         raise ValueError("--block-min-sample-frac must be within [0,1]")
+    if not (0.0 <= args.sample_min_ref_cover_frac <= 1.0):
+        raise ValueError("--sample-min-ref-cover-frac must be within [0,1]")
     if args.block_min_sites < 1:
         raise ValueError("--block-min-sites must be >= 1")
 
     if input_path.is_dir():
-        input_fa, sample_map, sample_map_tsv = prepare_mtblocks_input_from_sortorgan(input_path, out_dir=out_dir)
+        input_fa, sample_map, sample_map_tsv = prepare_mtblocks_input_from_sortorgan(
+            input_path,
+            out_dir=out_dir,
+            min_ref_cover_frac=args.sample_min_ref_cover_frac,
+        )
         logger.info("mtBlocks input detected as sortOrgan directory: %s", input_path)
         logger.info("mtBlocks combined contig fasta: %s", input_fa)
         logger.info("mtBlocks sample map: %s", sample_map_tsv)
@@ -3069,6 +3108,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         pangraph_bin=args.pangraph_bin,
         pangraph_json=args.pangraph_json,
         blocks_dir=args.blocks_dir,
+        sample_min_ref_cover_frac=args.sample_min_ref_cover_frac,
         mafft_bin=args.mafft_bin,
         trimal_bin=args.trimal_bin,
         block_jobs=args.block_jobs,
@@ -5026,6 +5066,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
     p_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
     p_mt.add_argument("--blocks-dir", help="Directory containing Pangraph-derived LCB/block FASTA files")
+    p_mt.add_argument(
+        "--sample-min-ref-cover-frac",
+        type=float,
+        default=0.5,
+        help="In sortOrgan directory mode, keep only samples with sortorgan_summary.tsv ref_covered_frac >= this threshold",
+    )
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
@@ -5146,6 +5192,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
     p_ch_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON for mtBlocks")
     p_ch_mt.add_argument("--blocks-dir", help="Existing Pangraph-derived LCB/block FASTA directory for mtBlocks")
+    p_ch_mt.add_argument(
+        "--sample-min-ref-cover-frac",
+        type=float,
+        default=0.5,
+        help="In sortOrgan directory mode, keep only samples with sortorgan_summary.tsv ref_covered_frac >= this threshold",
+    )
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_ch_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
