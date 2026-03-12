@@ -286,8 +286,7 @@ OrganPath plant_mt \
   --jobs 5 \
   --threads 16 \
   --run-pangraph \
-  --pangraph-args <PANGRAPH_ARGS...> \
-  --blocks-dir <LCB_FASTA_DIR_OR_PANGRAPH_OUTPUT_DIR>
+  --ufboot 1000
 
 # Animal mitochondrial channel (simpler direct alignment route)
 OrganPath animal_mt -i reads_dir -o out_animal_mt -s seed_animal_mt.fa --jobs 5 --threads 16 --run-ml
@@ -393,16 +392,17 @@ OrganPath RenameTree \
 
 `mtBlocks` now supports this order:
 1. Read `sortOrgan` output directory or mt multifasta input
-2. PanGraph: build pangenome graph (`pangraph_output.json`)
-3. Obtain homologous local blocks / LCB-like FASTAs from the Pangraph workflow
-4. Collapse multiple records from the same sample within each block
-5. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
-6. concatenate all kept blocks to `mt_supermatrix.fasta` (`mt_partitions.txt`)
-7. IQ-TREE on the concatenated supermatrix to generate a fast guide tree for downstream `OrganPath panman`
+2. Run `pangraph build`
+3. Run `pangraph export block-sequences`
+4. Count sample presence for each block and flag duplicated samples
+5. By default, keep only single-copy blocks present in at least 50% of samples
+6. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
+7. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
+8. build a guide tree from the concatenated supermatrix with IQ-TREE
 
 This is the recommended plant mitochondrial route:
 - keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
-- let PanGraph derive homologous blocks directly from those contigs
+- let Pangraph derive homologous blocks directly from those contigs
 - align each block separately and concatenate only after block detection
 
 Example:
@@ -412,10 +412,9 @@ OrganPath mtBlocks \
   -i out_mt/sortOrgan \
   -o out_mt/mtBlocks \
   --run-pangraph \
-  --pangraph-args <PANGRAPH_ARGS...> \
-  --blocks-dir <LCB_FASTA_DIR_OR_PANGRAPH_OUTPUT_DIR> \
   --block-jobs 8 \
   --block-sample-gap-n 100 \
+  --block-min-sample-frac 0.5 \
   --block-max-missing-frac 0.2 \
   --block-min-sites 50 \
   --run-ml
@@ -423,22 +422,24 @@ OrganPath mtBlocks \
 
 Legacy multifasta input is still accepted, but directory input is preferred because it preserves each sample's separate mt contigs.
 
-Argument placeholders supported in `--pangraph-args`:
-- `{input_fasta}`: input multifasta
-- `{pangraph_out}`: PanGraph working directory
-- `{pangraph_json}`: PanGraph JSON path (default: `pangraph/pangraph_output.json`)
-- `{blocks_dir}`: directory where Pangraph-derived LCB/block FASTAs should be written
+`mtBlocks` now handles Pangraph internally:
+- `pangraph build --circular --output pangraph/pangraph_output.json`
+- `pangraph export block-sequences --output pangraph_blocks pangraph/pangraph_output.json`
+- if you already have Pangraph output, you can skip rerunning with `--pangraph-json` and/or `--blocks-dir`
 
 Useful `mtBlocks` block filters:
 - `--block-jobs`: parallelize per-block MAFFT/trim/filter
 - `--block-sample-gap-n`: if one sample contributes multiple records to the same block, join them with Ns before MAFFT
+- `--block-min-sample-frac`: default `0.5`; keep only blocks present in at least half the samples
+- `--block-keep-multicopy`: by default multi-copy blocks are skipped; enable this to keep them
 - `--block-max-missing-frac`: drop highly-missing columns within each block after trim
 - `--block-snp-only`: keep SNP columns only within each block
 - `--block-min-samples`: skip blocks with too few sequences
 - `--block-min-sites`: skip blocks that are too short after trim/filter
 
-`mtblocks_summary.tsv` now records raw block record count, aligned/trimmed/final block length,
-final missing fraction, kept output fasta, and skip/fail reason for each block.
+`mtblocks_summary.tsv` now records raw record count, unique sample count, sample presence fraction,
+duplicate-sample flags, aligned/trimmed/final block length, final missing fraction, kept output fasta,
+and skip/fail reason for each block.
 Final primary outputs are:
 - `mt_supermatrix.fasta`
 - `mtblocks.treefile` (copied from IQ-TREE output when `--run-ml` is enabled)

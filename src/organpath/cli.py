@@ -2459,7 +2459,7 @@ def collapse_block_to_sample_fasta(
     out_fa: Path,
     sample_map: Dict[str, str],
     sample_gap_n: int,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, List[str]]:
     seqs = read_fasta_sequences(block_fa)
     grouped: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     for rid, seq in seqs.items():
@@ -2468,12 +2468,15 @@ def collapse_block_to_sample_fasta(
 
     gap = "N" * max(0, sample_gap_n)
     collapsed: Dict[str, str] = {}
+    duplicate_samples: List[str] = []
     for sample, items in grouped.items():
         items.sort(key=lambda x: x[0])
+        if len(items) > 1:
+            duplicate_samples.append(f"{sample}:{len(items)}")
         collapsed[sample] = gap.join(seq for _rid, seq in items)
 
     write_fasta_sequences(out_fa, collapsed)
-    return len(seqs), len(collapsed)
+    return len(seqs), len(collapsed), duplicate_samples
 
 
 def align_trim_one_block(block_fa: Path, out_dir: Path, mafft_bin: str, trimal_bin: str) -> Optional[Path]:
@@ -2513,8 +2516,11 @@ def process_mt_block(
     mafft_bin: str,
     trimal_bin: str,
     sample_map: Dict[str, str],
+    total_samples: int,
     sample_gap_n: int,
     max_missing_frac: float,
+    min_sample_frac: float,
+    keep_multicopy: bool,
     snp_only: bool,
     min_samples: int,
     min_sites: int,
@@ -2522,7 +2528,10 @@ def process_mt_block(
     result: Dict[str, object] = {
         "block_file": str(block_fa),
         "status": "FAIL",
-        "raw_samples": 0,
+        "raw_records": 0,
+        "presence_samples": 0,
+        "presence_frac": 0.0,
+        "duplicate_samples": "-",
         "aligned_len": 0,
         "trimmed_len": 0,
         "kept_sites": 0,
@@ -2534,13 +2543,24 @@ def process_mt_block(
     }
 
     collapsed_in = out_dir / f"{block_fa.stem}.sample_input.fasta"
-    raw_records, collapsed_samples = collapse_block_to_sample_fasta(
+    raw_records, collapsed_samples, duplicate_samples = collapse_block_to_sample_fasta(
         block_fa=block_fa,
         out_fa=collapsed_in,
         sample_map=sample_map,
         sample_gap_n=sample_gap_n,
     )
-    result["raw_samples"] = raw_records
+    result["raw_records"] = raw_records
+    result["presence_samples"] = collapsed_samples
+    result["presence_frac"] = (collapsed_samples / total_samples) if total_samples > 0 else 0.0
+    result["duplicate_samples"] = ",".join(duplicate_samples) if duplicate_samples else "-"
+    if duplicate_samples and not keep_multicopy:
+        result["status"] = "SKIP"
+        result["message"] = "multicopy_block"
+        return result
+    if result["presence_frac"] < min_sample_frac:
+        result["status"] = "SKIP"
+        result["message"] = f"sample_presence<{min_sample_frac:.2f}"
+        return result
     if collapsed_samples < min_samples:
         result["status"] = "SKIP"
         result["message"] = f"too_few_samples<{min_samples}"
@@ -2564,7 +2584,9 @@ def process_mt_block(
         result["aligned_len"] = aligned_len
         result["trimmed_len"] = trimmed_len
         result["final_samples"] = trimmed_samples
-        if raw_records != collapsed_samples:
+        if duplicate_samples and keep_multicopy:
+            result["message"] = f"collapsed_records:{raw_records}->{collapsed_samples}"
+        elif raw_records != collapsed_samples:
             result["message"] = f"collapsed_records:{raw_records}->{collapsed_samples}"
 
         if max_missing_frac < 1.0 or snp_only:
@@ -2774,30 +2796,32 @@ def run_mtblocks_pangraph_pipeline(args: argparse.Namespace, input_fa: Path, out
     pangraph_out.mkdir(parents=True, exist_ok=True)
     pangraph_json = Path(args.pangraph_json).resolve() if args.pangraph_json else (pangraph_out / "pangraph_output.json")
     blocks_dir = Path(args.blocks_dir).resolve() if args.blocks_dir else (out_dir / "pangraph_blocks")
-
-    def _render_tokens(items: List[str]) -> List[str]:
-        rendered: List[str] = []
-        for x in items:
-            rendered.append(
-                x.replace("{input_fasta}", str(input_fa))
-                .replace("{pangraph_out}", str(pangraph_out))
-                .replace("{pangraph_json}", str(pangraph_json))
-                .replace("{blocks_dir}", str(blocks_dir))
-            )
-        return rendered
+    pangraph_bin = shutil.which(args.pangraph_bin)
+    if not pangraph_bin:
+        raise RuntimeError(f"PanGraph executable not found: {args.pangraph_bin}")
 
     if args.run_pangraph:
-        pangraph_bin = shutil.which(args.pangraph_bin)
-        if not pangraph_bin:
-            raise RuntimeError(f"PanGraph executable not found: {args.pangraph_bin}")
         blocks_dir.mkdir(parents=True, exist_ok=True)
-        if not args.pangraph_args:
-            raise ValueError(
-                "mtBlocks now requires --pangraph-args when --run-pangraph is used. "
-                "Your pangraph workflow must write LCB/block FASTA files into --blocks-dir. "
-                "Supported placeholders: {input_fasta} {pangraph_out} {pangraph_json} {blocks_dir}."
-            )
-        run_command([pangraph_bin] + _render_tokens(list(args.pangraph_args)))
+        run_command(
+            [
+                pangraph_bin,
+                "build",
+                "--circular",
+                "--output",
+                str(pangraph_json),
+                str(input_fa),
+            ]
+        )
+        run_command(
+            [
+                pangraph_bin,
+                "export",
+                "block-sequences",
+                "--output",
+                str(blocks_dir),
+                str(pangraph_json),
+            ]
+        )
     elif not pangraph_json.exists() and not blocks_dir.exists():
         raise FileNotFoundError(
             "mtBlocks requires either --run-pangraph or existing --pangraph-json/--blocks-dir output."
@@ -2806,7 +2830,7 @@ def run_mtblocks_pangraph_pipeline(args: argparse.Namespace, input_fa: Path, out
     if not blocks_dir.exists():
         raise FileNotFoundError(
             f"mtBlocks expected LCB/block FASTA directory but not found: {blocks_dir}. "
-            "Please point --blocks-dir to Pangraph-derived block FASTAs or make --pangraph-args write them."
+            "Please point --blocks-dir to Pangraph-derived block FASTAs or rerun with --run-pangraph."
         )
 
     return {
@@ -2837,6 +2861,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Input not found: {input_path}")
     if not (0.0 <= args.block_max_missing_frac <= 1.0):
         raise ValueError("--block-max-missing-frac must be within [0,1]")
+    if not (0.0 <= args.block_min_sample_frac <= 1.0):
+        raise ValueError("--block-min-sample-frac must be within [0,1]")
     if args.block_min_samples < 2:
         raise ValueError("--block-min-samples must be >= 2")
     if args.block_min_sites < 1:
@@ -2850,6 +2876,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     else:
         input_fa = input_path
         sample_map = infer_mtblocks_sample_map_from_fasta(input_fa)
+    total_samples = len(set(sample_map.values()))
 
     paths = run_mtblocks_pangraph_pipeline(args, input_fa=input_fa, out_dir=out_dir)
     blocks_dir = paths["blocks_dir"]
@@ -2870,8 +2897,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     workers = max(1, min(int(args.block_jobs), len(block_fastas)))
     with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
         sumf.write(
-            "block_file\tstatus\traw_samples\taligned_len\ttrimmed_len\tkept_sites\t"
-            "final_samples\tfinal_len\tfinal_missing_frac\ttrimmed_block\tmessage\n"
+            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\t"
+            "aligned_len\ttrimmed_len\tkept_sites\tfinal_samples\tfinal_len\tfinal_missing_frac\ttrimmed_block\tmessage\n"
         )
         if workers == 1:
             block_results = [
@@ -2881,8 +2908,11 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                     mafft_bin=mafft_bin,
                     trimal_bin=trimal_bin,
                     sample_map=sample_map,
+                    total_samples=total_samples,
                     sample_gap_n=args.block_sample_gap_n,
                     max_missing_frac=args.block_max_missing_frac,
+                    min_sample_frac=args.block_min_sample_frac,
+                    keep_multicopy=args.block_keep_multicopy,
                     snp_only=args.block_snp_only,
                     min_samples=args.block_min_samples,
                     min_sites=args.block_min_sites,
@@ -2899,8 +2929,11 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                         mafft_bin,
                         trimal_bin,
                         sample_map,
+                        total_samples,
                         args.block_sample_gap_n,
                         args.block_max_missing_frac,
+                        args.block_min_sample_frac,
+                        args.block_keep_multicopy,
                         args.block_snp_only,
                         args.block_min_samples,
                         args.block_min_sites,
@@ -2910,11 +2943,15 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                 for fut in concurrent.futures.as_completed(futs):
                     block_results.append(fut.result())
 
+        kept_recs = [rec for rec in block_results if str(rec["status"]) == "OK" and str(rec["trimmed_block"]) != "-"]
+        kept_recs.sort(key=lambda x: (-int(x["final_len"]), str(x["block_file"])))
+        for rec in kept_recs:
+            trimmed_blocks.append(Path(str(rec["trimmed_block"])))
+
         for rec in sorted(block_results, key=lambda x: str(x["block_file"])):
-            if str(rec["status"]) == "OK" and str(rec["trimmed_block"]) != "-":
-                trimmed_blocks.append(Path(str(rec["trimmed_block"])))
             sumf.write(
-                f"{rec['block_file']}\t{rec['status']}\t{rec['raw_samples']}\t"
+                f"{rec['block_file']}\t{rec['status']}\t{rec['raw_records']}\t{rec['presence_samples']}\t"
+                f"{float(rec['presence_frac']):.4f}\t{rec['duplicate_samples']}\t"
                 f"{rec['aligned_len']}\t{rec['trimmed_len']}\t{rec['kept_sites']}\t"
                 f"{rec['final_samples']}\t{rec['final_len']}\t{float(rec['final_missing_frac']):.4f}\t"
                 f"{rec['trimmed_block']}\t{rec['message']}\n"
@@ -3032,7 +3069,6 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         outdir=str((Path(args.outdir).resolve() / "mtBlocks")),
         run_pangraph=args.run_pangraph,
         pangraph_bin=args.pangraph_bin,
-        pangraph_args=args.pangraph_args,
         pangraph_json=args.pangraph_json,
         blocks_dir=args.blocks_dir,
         mafft_bin=args.mafft_bin,
@@ -3040,6 +3076,8 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         block_jobs=args.block_jobs,
         block_sample_gap_n=args.block_sample_gap_n,
         block_max_missing_frac=args.block_max_missing_frac,
+        block_min_sample_frac=args.block_min_sample_frac,
+        block_keep_multicopy=args.block_keep_multicopy,
         block_snp_only=args.block_snp_only,
         block_min_samples=args.block_min_samples,
         block_min_sites=args.block_min_sites,
@@ -4986,12 +5024,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph / LCB generation stage")
     p_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
-    p_mt.add_argument(
-        "--pangraph-args",
-        nargs="*",
-        default=[],
-        help="Arguments passed to PanGraph / LCB export workflow. Supports placeholders: {input_fasta} {pangraph_out} {pangraph_json} {blocks_dir}",
-    )
     p_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
     p_mt.add_argument("--blocks-dir", help="Directory containing Pangraph-derived LCB/block FASTA files")
     p_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
@@ -5010,6 +5042,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
     )
     p_mt.add_argument(
+        "--block-min-sample-frac",
+        type=float,
+        default=0.5,
+        help="Keep blocks only when at least this fraction of samples are present (default: 0.5)",
+    )
+    p_mt.add_argument(
+        "--block-keep-multicopy",
+        action="store_true",
+        help="Keep blocks with duplicated records from the same sample (default: skip multi-copy blocks)",
+    )
+    p_mt.add_argument(
         "--block-snp-only",
         action="store_true",
         help="Per-block post-trim site filter: keep SNP columns only",
@@ -5022,9 +5065,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Run IQ-TREE on concatenated supermatrix (default: on)",
     )
-    p_mt.add_argument("--ufboot", type=int, default=100, help="Ultrafast bootstrap replicate number (fast mtBlocks default)")
+    p_mt.add_argument("--ufboot", type=int, default=1000, help="Ultrafast bootstrap replicate number")
     p_mt.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
-    p_mt.add_argument("--model", default="GTR+G", help="Model option passed to iqtree -m")
+    p_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
     p_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_mt.set_defaults(func=cmd_mt_blocks)
 
@@ -5108,7 +5151,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
     p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph / LCB generation stage")
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
-    p_ch_mt.add_argument("--pangraph-args", nargs="*", default=[], help="Arguments passed to PanGraph / LCB export workflow")
     p_ch_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON for mtBlocks")
     p_ch_mt.add_argument("--blocks-dir", help="Existing Pangraph-derived LCB/block FASTA directory for mtBlocks")
     p_ch_mt.add_argument("--mafft-bin", default="mafft", help="Path or name of mafft executable")
@@ -5127,6 +5169,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
     )
     p_ch_mt.add_argument(
+        "--block-min-sample-frac",
+        type=float,
+        default=0.5,
+        help="Keep blocks only when at least this fraction of samples are present (default: 0.5)",
+    )
+    p_ch_mt.add_argument(
+        "--block-keep-multicopy",
+        action="store_true",
+        help="Keep blocks with duplicated records from the same sample (default: skip multi-copy blocks)",
+    )
+    p_ch_mt.add_argument(
         "--block-snp-only",
         action="store_true",
         help="Per-block post-trim site filter: keep SNP columns only",
@@ -5139,9 +5192,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Run IQ-TREE on concatenated mtBlocks supermatrix (default: on)",
     )
-    p_ch_mt.add_argument("--ufboot", type=int, default=100, help="Ultrafast bootstrap replicate number (fast mtBlocks default)")
+    p_ch_mt.add_argument("--ufboot", type=int, default=1000, help="Ultrafast bootstrap replicate number")
     p_ch_mt.add_argument("--ml-threads", default="AUTO", help="Thread setting passed to iqtree -T")
-    p_ch_mt.add_argument("--model", default="GTR+G", help="Model option passed to iqtree -m")
+    p_ch_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
     p_ch_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_ch_mt.set_defaults(func=cmd_channel_plant_mt)
 
