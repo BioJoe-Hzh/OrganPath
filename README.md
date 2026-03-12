@@ -285,7 +285,6 @@ OrganPath plant_mt \
   -s seed_mt.fa \
   --jobs 5 \
   --threads 16 \
-  --run-pangraph \
   --ufboot 1000
 
 # Animal mitochondrial channel (simpler direct alignment route)
@@ -395,10 +394,11 @@ OrganPath RenameTree \
 2. Run `pangraph build`
 3. Run `pangraph export block-sequences`
 4. Count sample presence for each block and flag duplicated samples
-5. By default, keep only single-copy blocks present in at least 50% of samples
-6. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
-7. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
-8. build a guide tree from the concatenated supermatrix with IQ-TREE
+5. If one sample has duplicate identical sequences in a block, keep one copy; if duplicates differ, drop that block
+6. By default, keep only blocks present in at least 50% of samples
+7. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
+8. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
+9. build a guide tree from the concatenated supermatrix with IQ-TREE
 
 This is the recommended plant mitochondrial route:
 - keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
@@ -411,12 +411,9 @@ Example:
 OrganPath mtBlocks \
   -i out_mt/sortOrgan \
   -o out_mt/mtBlocks \
-  --run-pangraph \
   --block-jobs 8 \
-  --block-sample-gap-n 100 \
   --block-min-sample-frac 0.5 \
-  --block-max-missing-frac 0.2 \
-  --block-min-sites 50 \
+  --block-min-sites 300 \
   --run-ml
 ```
 
@@ -425,17 +422,14 @@ Legacy multifasta input is still accepted, but directory input is preferred beca
 `mtBlocks` now handles Pangraph internally:
 - `pangraph build --circular --output pangraph/pangraph_output.json`
 - `pangraph export block-sequences --output pangraph_blocks pangraph/pangraph_output.json`
-- if you already have Pangraph output, you can skip rerunning with `--pangraph-json` and/or `--blocks-dir`
+- by default this internal Pangraph step is on; you only need `--no-run-pangraph` if you already have `--pangraph-json` and/or `--blocks-dir`
 
 Useful `mtBlocks` block filters:
 - `--block-jobs`: parallelize per-block MAFFT/trim/filter
-- `--block-sample-gap-n`: if one sample contributes multiple records to the same block, join them with Ns before MAFFT
 - `--block-min-sample-frac`: default `0.5`; keep only blocks present in at least half the samples
-- `--block-keep-multicopy`: by default multi-copy blocks are skipped; enable this to keep them
-- `--block-max-missing-frac`: drop highly-missing columns within each block after trim
+- `--block-max-missing-frac`: optional extra post-trim site filter; default is disabled so trimAl output is used directly
 - `--block-snp-only`: keep SNP columns only within each block
-- `--block-min-samples`: skip blocks with too few sequences
-- `--block-min-sites`: skip blocks that are too short after trim/filter
+- `--block-min-sites`: default `300`; skip blocks that are too short after trim/filter
 
 `mtblocks_summary.tsv` now records raw record count, unique sample count, sample presence fraction,
 duplicate-sample flags, aligned/trimmed/final block length, final missing fraction, kept output fasta,

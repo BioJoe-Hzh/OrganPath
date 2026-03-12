@@ -2459,24 +2459,33 @@ def collapse_block_to_sample_fasta(
     out_fa: Path,
     sample_map: Dict[str, str],
     sample_gap_n: int,
-) -> Tuple[int, int, List[str]]:
+) -> Tuple[int, int, List[str], List[str]]:
     seqs = read_fasta_sequences(block_fa)
     grouped: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     for rid, seq in seqs.items():
         sample = sample_map.get(rid, sample_name_from_contig_record_id(rid))
         grouped[sample].append((rid, seq))
 
-    gap = "N" * max(0, sample_gap_n)
     collapsed: Dict[str, str] = {}
     duplicate_samples: List[str] = []
+    conflicting_samples: List[str] = []
     for sample, items in grouped.items():
         items.sort(key=lambda x: x[0])
+        uniq_seqs = []
+        seen = set()
+        for _rid, seq in items:
+            if seq not in seen:
+                seen.add(seq)
+                uniq_seqs.append(seq)
         if len(items) > 1:
             duplicate_samples.append(f"{sample}:{len(items)}")
-        collapsed[sample] = gap.join(seq for _rid, seq in items)
+        if len(uniq_seqs) > 1:
+            conflicting_samples.append(f"{sample}:{len(uniq_seqs)}")
+            continue
+        collapsed[sample] = uniq_seqs[0]
 
     write_fasta_sequences(out_fa, collapsed)
-    return len(seqs), len(collapsed), duplicate_samples
+    return len(seqs), len(collapsed), duplicate_samples, conflicting_samples
 
 
 def align_trim_one_block(block_fa: Path, out_dir: Path, mafft_bin: str, trimal_bin: str) -> Optional[Path]:
@@ -2517,12 +2526,9 @@ def process_mt_block(
     trimal_bin: str,
     sample_map: Dict[str, str],
     total_samples: int,
-    sample_gap_n: int,
     max_missing_frac: float,
     min_sample_frac: float,
-    keep_multicopy: bool,
     snp_only: bool,
-    min_samples: int,
     min_sites: int,
 ) -> Dict[str, object]:
     result: Dict[str, object] = {
@@ -2532,6 +2538,7 @@ def process_mt_block(
         "presence_samples": 0,
         "presence_frac": 0.0,
         "duplicate_samples": "-",
+        "conflicting_samples": "-",
         "aligned_len": 0,
         "trimmed_len": 0,
         "kept_sites": 0,
@@ -2543,27 +2550,28 @@ def process_mt_block(
     }
 
     collapsed_in = out_dir / f"{block_fa.stem}.sample_input.fasta"
-    raw_records, collapsed_samples, duplicate_samples = collapse_block_to_sample_fasta(
+    raw_records, collapsed_samples, duplicate_samples, conflicting_samples = collapse_block_to_sample_fasta(
         block_fa=block_fa,
         out_fa=collapsed_in,
         sample_map=sample_map,
-        sample_gap_n=sample_gap_n,
+        sample_gap_n=0,
     )
     result["raw_records"] = raw_records
     result["presence_samples"] = collapsed_samples
     result["presence_frac"] = (collapsed_samples / total_samples) if total_samples > 0 else 0.0
     result["duplicate_samples"] = ",".join(duplicate_samples) if duplicate_samples else "-"
-    if duplicate_samples and not keep_multicopy:
+    result["conflicting_samples"] = ",".join(conflicting_samples) if conflicting_samples else "-"
+    if conflicting_samples:
         result["status"] = "SKIP"
-        result["message"] = "multicopy_block"
+        result["message"] = "multicopy_conflict"
         return result
     if result["presence_frac"] < min_sample_frac:
         result["status"] = "SKIP"
         result["message"] = f"sample_presence<{min_sample_frac:.2f}"
         return result
-    if collapsed_samples < min_samples:
+    if collapsed_samples < 2:
         result["status"] = "SKIP"
-        result["message"] = f"too_few_samples<{min_samples}"
+        result["message"] = "too_few_samples<2"
         return result
 
     aln = out_dir / f"{block_fa.stem}.aln.fasta"
@@ -2584,9 +2592,7 @@ def process_mt_block(
         result["aligned_len"] = aligned_len
         result["trimmed_len"] = trimmed_len
         result["final_samples"] = trimmed_samples
-        if duplicate_samples and keep_multicopy:
-            result["message"] = f"collapsed_records:{raw_records}->{collapsed_samples}"
-        elif raw_records != collapsed_samples:
+        if raw_records != collapsed_samples:
             result["message"] = f"collapsed_records:{raw_records}->{collapsed_samples}"
 
         if max_missing_frac < 1.0 or snp_only:
@@ -2612,9 +2618,9 @@ def process_mt_block(
             result["message"] = f"too_few_sites<{min_sites}"
             return result
 
-        if final_samples < min_samples:
+        if final_samples < 2:
             result["status"] = "SKIP"
-            result["message"] = f"too_few_samples_after_trim<{min_samples}"
+            result["message"] = "too_few_samples_after_trim<2"
             return result
 
         result["status"] = "OK"
@@ -2863,8 +2869,6 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         raise ValueError("--block-max-missing-frac must be within [0,1]")
     if not (0.0 <= args.block_min_sample_frac <= 1.0):
         raise ValueError("--block-min-sample-frac must be within [0,1]")
-    if args.block_min_samples < 2:
-        raise ValueError("--block-min-samples must be >= 2")
     if args.block_min_sites < 1:
         raise ValueError("--block-min-sites must be >= 1")
 
@@ -2897,7 +2901,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     workers = max(1, min(int(args.block_jobs), len(block_fastas)))
     with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
         sumf.write(
-            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\t"
+            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\tconflicting_samples\t"
             "aligned_len\ttrimmed_len\tkept_sites\tfinal_samples\tfinal_len\tfinal_missing_frac\ttrimmed_block\tmessage\n"
         )
         if workers == 1:
@@ -2909,12 +2913,9 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                     trimal_bin=trimal_bin,
                     sample_map=sample_map,
                     total_samples=total_samples,
-                    sample_gap_n=args.block_sample_gap_n,
                     max_missing_frac=args.block_max_missing_frac,
                     min_sample_frac=args.block_min_sample_frac,
-                    keep_multicopy=args.block_keep_multicopy,
                     snp_only=args.block_snp_only,
-                    min_samples=args.block_min_samples,
                     min_sites=args.block_min_sites,
                 )
                 for bf in block_fastas
@@ -2930,12 +2931,9 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                         trimal_bin,
                         sample_map,
                         total_samples,
-                        args.block_sample_gap_n,
                         args.block_max_missing_frac,
                         args.block_min_sample_frac,
-                        args.block_keep_multicopy,
                         args.block_snp_only,
-                        args.block_min_samples,
                         args.block_min_sites,
                     )
                     for bf in block_fastas
@@ -2951,7 +2949,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         for rec in sorted(block_results, key=lambda x: str(x["block_file"])):
             sumf.write(
                 f"{rec['block_file']}\t{rec['status']}\t{rec['raw_records']}\t{rec['presence_samples']}\t"
-                f"{float(rec['presence_frac']):.4f}\t{rec['duplicate_samples']}\t"
+                f"{float(rec['presence_frac']):.4f}\t{rec['duplicate_samples']}\t{rec['conflicting_samples']}\t"
                 f"{rec['aligned_len']}\t{rec['trimmed_len']}\t{rec['kept_sites']}\t"
                 f"{rec['final_samples']}\t{rec['final_len']}\t{float(rec['final_missing_frac']):.4f}\t"
                 f"{rec['trimmed_block']}\t{rec['message']}\n"
@@ -3074,12 +3072,9 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         mafft_bin=args.mafft_bin,
         trimal_bin=args.trimal_bin,
         block_jobs=args.block_jobs,
-        block_sample_gap_n=args.block_sample_gap_n,
         block_max_missing_frac=args.block_max_missing_frac,
         block_min_sample_frac=args.block_min_sample_frac,
-        block_keep_multicopy=args.block_keep_multicopy,
         block_snp_only=args.block_snp_only,
-        block_min_samples=args.block_min_samples,
         block_min_sites=args.block_min_sites,
         run_ml=args.run_ml,
         ufboot=args.ufboot,
@@ -5022,7 +5017,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Input sortOrgan output directory or multifasta. Directory mode preserves per-sample multi-contig mt assemblies.",
     )
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
-    p_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph / LCB generation stage")
+    p_mt.add_argument(
+        "--run-pangraph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run Pangraph build + export block-sequences internally (default: on)",
+    )
     p_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable name/path")
     p_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON (if already generated)")
     p_mt.add_argument("--blocks-dir", help="Directory containing Pangraph-derived LCB/block FASTA files")
@@ -5030,16 +5030,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
     p_mt.add_argument(
-        "--block-sample-gap-n",
-        type=int,
-        default=100,
-        help="If one sample contributes multiple records to the same block, join them with this many Ns before MAFFT",
-    )
-    p_mt.add_argument(
         "--block-max-missing-frac",
         type=float,
         default=1.0,
-        help="Per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
+        help="Optional per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1); default keeps trimAl output unchanged",
     )
     p_mt.add_argument(
         "--block-min-sample-frac",
@@ -5048,17 +5042,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep blocks only when at least this fraction of samples are present (default: 0.5)",
     )
     p_mt.add_argument(
-        "--block-keep-multicopy",
-        action="store_true",
-        help="Keep blocks with duplicated records from the same sample (default: skip multi-copy blocks)",
-    )
-    p_mt.add_argument(
         "--block-snp-only",
         action="store_true",
         help="Per-block post-trim site filter: keep SNP columns only",
     )
-    p_mt.add_argument("--block-min-samples", type=int, default=2, help="Skip blocks with fewer than this many samples")
-    p_mt.add_argument("--block-min-sites", type=int, default=1, help="Skip blocks with fewer than this many final alignment columns")
+    p_mt.add_argument("--block-min-sites", type=int, default=300, help="Skip blocks with fewer than this many final alignment columns")
     p_mt.add_argument(
         "--run-ml",
         action=argparse.BooleanOptionalAction,
@@ -5149,7 +5137,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --cp-exclude-ref: only exclude contigs whose chloroplast hit covers at least this fraction of the contig",
     )
     p_ch_mt.add_argument("--min-non-n-len", type=int, default=0, help="Minimum non-N length to keep sample in merged multifasta")
-    p_ch_mt.add_argument("--run-pangraph", action="store_true", help="Run PanGraph / LCB generation stage")
+    p_ch_mt.add_argument(
+        "--run-pangraph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run Pangraph build + export block-sequences internally (default: on)",
+    )
     p_ch_mt.add_argument("--pangraph-bin", default="pangraph", help="PanGraph executable")
     p_ch_mt.add_argument("--pangraph-json", help="Existing PanGraph JSON for mtBlocks")
     p_ch_mt.add_argument("--blocks-dir", help="Existing Pangraph-derived LCB/block FASTA directory for mtBlocks")
@@ -5157,16 +5150,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch_mt.add_argument("--trimal-bin", default="trimal", help="Path or name of trimal executable")
     p_ch_mt.add_argument("--block-jobs", type=int, default=1, help="Parallel jobs for per-block MAFFT/trim/filter")
     p_ch_mt.add_argument(
-        "--block-sample-gap-n",
-        type=int,
-        default=100,
-        help="If one sample contributes multiple records to the same block, join them with this many Ns before MAFFT",
-    )
-    p_ch_mt.add_argument(
         "--block-max-missing-frac",
         type=float,
         default=1.0,
-        help="Per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1)",
+        help="Optional per-block post-trim site filter: drop columns with missing fraction above this threshold (0-1); default keeps trimAl output unchanged",
     )
     p_ch_mt.add_argument(
         "--block-min-sample-frac",
@@ -5175,17 +5162,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep blocks only when at least this fraction of samples are present (default: 0.5)",
     )
     p_ch_mt.add_argument(
-        "--block-keep-multicopy",
-        action="store_true",
-        help="Keep blocks with duplicated records from the same sample (default: skip multi-copy blocks)",
-    )
-    p_ch_mt.add_argument(
         "--block-snp-only",
         action="store_true",
         help="Per-block post-trim site filter: keep SNP columns only",
     )
-    p_ch_mt.add_argument("--block-min-samples", type=int, default=2, help="Skip blocks with fewer than this many samples")
-    p_ch_mt.add_argument("--block-min-sites", type=int, default=1, help="Skip blocks with fewer than this many final alignment columns")
+    p_ch_mt.add_argument("--block-min-sites", type=int, default=300, help="Skip blocks with fewer than this many final alignment columns")
     p_ch_mt.add_argument(
         "--run-ml",
         action=argparse.BooleanOptionalAction,
