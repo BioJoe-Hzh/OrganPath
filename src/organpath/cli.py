@@ -2813,7 +2813,7 @@ def run_mtblocks_pangraph_pipeline(args: argparse.Namespace, input_fa: Path, out
                 pangraph_bin,
                 "build",
                 "--circular",
-                "--output",
+                "--output-json",
                 str(pangraph_json),
                 str(input_fa),
             ]
