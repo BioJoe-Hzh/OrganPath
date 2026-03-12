@@ -1,5 +1,6 @@
 import argparse
 import concurrent.futures
+import json
 import gzip
 import logging
 import shutil
@@ -281,6 +282,43 @@ def sample_name_from_contig_record_id(record_id: str) -> str:
     if m:
         return m.group(1)
     return record_id
+
+
+def read_fasta_headers_and_sequences(path: Path) -> List[Tuple[str, str]]:
+    records: List[Tuple[str, str]] = []
+    header: Optional[str] = None
+    chunks: List[str] = []
+    with path.open("rt") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if header is not None:
+                    records.append((header, "".join(chunks).upper()))
+                header = line[1:]
+                chunks = []
+            else:
+                chunks.append(line)
+    if header is not None:
+        records.append((header, "".join(chunks).upper()))
+    return records
+
+
+def sample_name_from_pangraph_header(header: str) -> Tuple[str, str]:
+    json_part = ""
+    if " {" in header:
+        _lead, json_part = header.split(" ", 1)
+    if json_part:
+        try:
+            meta = json.loads(json_part)
+            path_name = str(meta.get("path_name", "")).strip()
+            if path_name:
+                return sample_name_from_contig_record_id(path_name), path_name
+        except json.JSONDecodeError:
+            pass
+    token = header.split()[0]
+    return sample_name_from_contig_record_id(token), token
 
 
 def write_name_map(path: Path, samples: List[str], name_map: Dict[str, str], mode: str) -> None:
@@ -2492,16 +2530,19 @@ def collapse_block_to_sample_fasta(
     out_fa: Path,
     sample_map: Dict[str, str],
     sample_gap_n: int,
-) -> Tuple[int, int, List[str], List[str]]:
-    seqs = read_fasta_sequences(block_fa)
+) -> Tuple[int, int, List[str], List[str], List[str]]:
+    records = read_fasta_headers_and_sequences(block_fa)
     grouped: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-    for rid, seq in seqs.items():
-        sample = sample_map.get(rid, sample_name_from_contig_record_id(rid))
-        grouped[sample].append((rid, seq))
+    for header, seq in records:
+        sample, source_id = sample_name_from_pangraph_header(header)
+        if sample_map:
+            sample = sample_map.get(source_id, sample_map.get(sample, sample))
+        grouped[sample].append((source_id, seq))
 
     collapsed: Dict[str, str] = {}
     duplicate_samples: List[str] = []
     conflicting_samples: List[str] = []
+    short_filtered_samples: List[str] = []
     for sample, items in grouped.items():
         items.sort(key=lambda x: x[0])
         uniq_seqs = []
@@ -2517,8 +2558,17 @@ def collapse_block_to_sample_fasta(
             continue
         collapsed[sample] = uniq_seqs[0]
 
+    non_n_lengths = [non_n_length(seq) for seq in collapsed.values()]
+    mean_non_n = (sum(non_n_lengths) / len(non_n_lengths)) if non_n_lengths else 0.0
+    min_keep_len = mean_non_n / 2.0
+    if min_keep_len > 0:
+        for sample, seq in list(collapsed.items()):
+            if non_n_length(seq) < min_keep_len:
+                short_filtered_samples.append(f"{sample}:{non_n_length(seq)}<{min_keep_len:.1f}")
+                del collapsed[sample]
+
     write_fasta_sequences(out_fa, collapsed)
-    return len(seqs), len(collapsed), duplicate_samples, conflicting_samples
+    return len(records), len(collapsed), duplicate_samples, conflicting_samples, short_filtered_samples
 
 
 def align_trim_one_block(block_fa: Path, out_dir: Path, mafft_bin: str, trimal_bin: str) -> Optional[Path]:
@@ -2572,6 +2622,7 @@ def process_mt_block(
         "presence_frac": 0.0,
         "duplicate_samples": "-",
         "conflicting_samples": "-",
+        "short_filtered_samples": "-",
         "aligned_len": 0,
         "trimmed_len": 0,
         "kept_sites": 0,
@@ -2582,18 +2633,22 @@ def process_mt_block(
         "message": "-",
     }
 
+    mapped_block = out_dir / f"{block_fa.stem}.mapped.fasta"
     collapsed_in = out_dir / f"{block_fa.stem}.sample_input.fasta"
-    raw_records, collapsed_samples, duplicate_samples, conflicting_samples = collapse_block_to_sample_fasta(
+    raw_records, collapsed_samples, duplicate_samples, conflicting_samples, short_filtered_samples = collapse_block_to_sample_fasta(
         block_fa=block_fa,
-        out_fa=collapsed_in,
+        out_fa=mapped_block,
         sample_map=sample_map,
         sample_gap_n=0,
     )
+    seqs = read_fasta_sequences(mapped_block)
+    write_fasta_sequences(collapsed_in, seqs)
     result["raw_records"] = raw_records
     result["presence_samples"] = collapsed_samples
     result["presence_frac"] = (collapsed_samples / total_samples) if total_samples > 0 else 0.0
     result["duplicate_samples"] = ",".join(duplicate_samples) if duplicate_samples else "-"
     result["conflicting_samples"] = ",".join(conflicting_samples) if conflicting_samples else "-"
+    result["short_filtered_samples"] = ",".join(short_filtered_samples) if short_filtered_samples else "-"
     if conflicting_samples:
         result["status"] = "SKIP"
         result["message"] = "multicopy_conflict"
@@ -2701,7 +2756,7 @@ def concatenate_blocks(trimmed_blocks: List[Path], out_fa: Path, out_partitions:
         for s in all_samples:
             concat = []
             for _bid, seqs, blen in block_data:
-                concat.append(seqs.get(s, "N" * blen))
+                concat.append(seqs.get(s, "-" * blen))
             out.write(f">{s}\n{''.join(concat)}\n")
 
 
@@ -2949,7 +3004,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     workers = max(1, min(block_jobs, len(block_fastas)))
     with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
         sumf.write(
-            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\tconflicting_samples\t"
+            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\tconflicting_samples\tshort_filtered_samples\t"
             "aligned_len\ttrimmed_len\tkept_sites\tfinal_samples\tfinal_len\tfinal_missing_frac\ttrimmed_block\tmessage\n"
         )
         if workers == 1:
@@ -2997,7 +3052,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         for rec in sorted(block_results, key=lambda x: str(x["block_file"])):
             sumf.write(
                 f"{rec['block_file']}\t{rec['status']}\t{rec['raw_records']}\t{rec['presence_samples']}\t"
-                f"{float(rec['presence_frac']):.4f}\t{rec['duplicate_samples']}\t{rec['conflicting_samples']}\t"
+                f"{float(rec['presence_frac']):.4f}\t{rec['duplicate_samples']}\t{rec['conflicting_samples']}\t{rec['short_filtered_samples']}\t"
                 f"{rec['aligned_len']}\t{rec['trimmed_len']}\t{rec['kept_sites']}\t"
                 f"{rec['final_samples']}\t{rec['final_len']}\t{float(rec['final_missing_frac']):.4f}\t"
                 f"{rec['trimmed_block']}\t{rec['message']}\n"
