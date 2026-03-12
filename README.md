@@ -420,10 +420,11 @@ OrganPath mtBlocks \
 Legacy multifasta input is still accepted, but directory input is preferred because it preserves each sample's separate mt contigs.
 
 `mtBlocks` now handles Pangraph internally:
-- `pangraph build --circular --output pangraph/pangraph_output.json`
+- `pangraph build --circular --output-json pangraph/pangraph_output.json`
 - `pangraph export block-sequences --output pangraph_blocks pangraph/pangraph_output.json`
 - by default this internal Pangraph step is on; you only need `--no-run-pangraph` if you already have `--pangraph-json` and/or `--blocks-dir`
 - in sortOrgan directory mode, samples are pre-filtered by `sortorgan_summary.tsv`; default keeps only `ref_covered_frac >= 0.5`
+- the final concatenated alignment keeps exactly that filtered sample set; if a sample is missing in a block it is padded with `-`
 
 Useful `mtBlocks` block filters:
 - `--sample-min-ref-cover-frac`: default `0.5`; pre-filter samples before Pangraph using `sortorgan_summary.tsv`
@@ -435,8 +436,8 @@ Useful `mtBlocks` block filters:
 - `--block-min-sites`: default `300`; skip blocks that are too short after trim/filter
 
 `mtblocks_summary.tsv` now records raw record count, unique sample count, sample presence fraction,
-duplicate-sample flags, aligned/trimmed/final block length, final missing fraction, kept output fasta,
-and skip/fail reason for each block.
+duplicate-sample flags, conflicting multi-copy samples removed per block, short-sample removals,
+aligned/trimmed/final block length, final missing fraction, kept output fasta, and skip/fail reason for each block.
 Final primary outputs are:
 - `mt_supermatrix.fasta`
 - `mtblocks.treefile` (copied from IQ-TREE output when `--run-ml` is enabled)

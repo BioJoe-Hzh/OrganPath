@@ -2486,11 +2486,12 @@ def prepare_mtblocks_input_from_sortorgan(
     sortorgan_dir: Path,
     out_dir: Path,
     min_ref_cover_frac: float,
-) -> Tuple[Path, Dict[str, str], Path]:
+) -> Tuple[Path, Dict[str, str], Path, List[str]]:
     combined = out_dir / "mtblocks_input.fasta"
     mapping_tsv = out_dir / "mtblocks_input.sample_map.tsv"
     sample_filter_tsv = out_dir / "mtblocks_sample_filter.tsv"
     sample_map: Dict[str, str] = {}
+    selected_samples: List[str] = []
     sample_dirs = sorted(p for p in sortorgan_dir.iterdir() if p.is_dir())
     keep_map = load_sortorgan_sample_filter(sortorgan_dir / "sortorgan_summary.tsv", min_ref_cover_frac=min_ref_cover_frac)
     written = 0
@@ -2504,6 +2505,7 @@ def prepare_mtblocks_input_from_sortorgan(
             sf.write(f"{sample}\t{'KEEP' if keep_sample else 'DROP'}\tref_covered_frac>={min_ref_cover_frac:.3f}\n")
             if not keep_sample:
                 continue
+            selected_samples.append(sample)
             organellar = sdir / f"{sample}.organellar.fasta"
             if not organellar.exists():
                 continue
@@ -2517,7 +2519,7 @@ def prepare_mtblocks_input_from_sortorgan(
 
     if written == 0:
         raise ValueError(f"No per-sample organellar FASTA files found in sortOrgan dir: {sortorgan_dir}")
-    return combined, sample_map, mapping_tsv
+    return combined, sample_map, mapping_tsv, selected_samples
 
 
 def infer_mtblocks_sample_map_from_fasta(input_fa: Path) -> Dict[str, str]:
@@ -2649,10 +2651,6 @@ def process_mt_block(
     result["duplicate_samples"] = ",".join(duplicate_samples) if duplicate_samples else "-"
     result["conflicting_samples"] = ",".join(conflicting_samples) if conflicting_samples else "-"
     result["short_filtered_samples"] = ",".join(short_filtered_samples) if short_filtered_samples else "-"
-    if conflicting_samples:
-        result["status"] = "SKIP"
-        result["message"] = "multicopy_conflict"
-        return result
     if result["presence_frac"] < min_sample_frac:
         result["status"] = "SKIP"
         result["message"] = f"sample_presence<{min_sample_frac:.2f}"
@@ -2680,8 +2678,15 @@ def process_mt_block(
         result["aligned_len"] = aligned_len
         result["trimmed_len"] = trimmed_len
         result["final_samples"] = trimmed_samples
+        message_bits: List[str] = []
         if raw_records != collapsed_samples:
-            result["message"] = f"collapsed_records:{raw_records}->{collapsed_samples}"
+            message_bits.append(f"collapsed_records:{raw_records}->{collapsed_samples}")
+        if conflicting_samples:
+            message_bits.append(f"multicopy_removed:{len(conflicting_samples)}")
+        if short_filtered_samples:
+            message_bits.append(f"short_removed:{len(short_filtered_samples)}")
+        if message_bits:
+            result["message"] = ";".join(message_bits)
 
         if max_missing_frac < 1.0 or snp_only:
             kept_sites, _total_sites = filter_alignment_sites(
@@ -2727,7 +2732,12 @@ def process_mt_block(
         return result
 
 
-def concatenate_blocks(trimmed_blocks: List[Path], out_fa: Path, out_partitions: Path) -> None:
+def concatenate_blocks(
+    trimmed_blocks: List[Path],
+    out_fa: Path,
+    out_partitions: Path,
+    expected_samples: Optional[List[str]] = None,
+) -> None:
     block_data: List[Tuple[str, Dict[str, str], int]] = []
     all_samples = set()
     for bf in trimmed_blocks:
@@ -2741,7 +2751,11 @@ def concatenate_blocks(trimmed_blocks: List[Path], out_fa: Path, out_partitions:
         block_data.append((bf.stem, seqs, blen))
         all_samples.update(seqs.keys())
 
-    all_samples = sorted(all_samples)
+    if expected_samples:
+        all_samples.update(expected_samples)
+        all_samples = sorted(set(expected_samples))
+    else:
+        all_samples = sorted(all_samples)
     if not block_data:
         raise ValueError("No trimmed blocks available for concatenation.")
 
@@ -2969,7 +2983,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         raise ValueError("--block-min-sites must be >= 1")
 
     if input_path.is_dir():
-        input_fa, sample_map, sample_map_tsv = prepare_mtblocks_input_from_sortorgan(
+        input_fa, sample_map, sample_map_tsv, selected_samples = prepare_mtblocks_input_from_sortorgan(
             input_path,
             out_dir=out_dir,
             min_ref_cover_frac=args.sample_min_ref_cover_frac,
@@ -2980,7 +2994,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     else:
         input_fa = input_path
         sample_map = infer_mtblocks_sample_map_from_fasta(input_fa)
-    total_samples = len(set(sample_map.values()))
+        selected_samples = sorted(set(sample_map.values()))
+    total_samples = len(selected_samples)
 
     paths = run_mtblocks_pangraph_pipeline(args, input_fa=input_fa, out_dir=out_dir)
     blocks_dir = paths["blocks_dir"]
@@ -3060,7 +3075,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
 
     supermatrix = out_dir / "mt_supermatrix.fasta"
     partitions = out_dir / "mt_partitions.txt"
-    concatenate_blocks(trimmed_blocks, supermatrix, partitions)
+    concatenate_blocks(trimmed_blocks, supermatrix, partitions, expected_samples=selected_samples)
     logger.info("Concatenated supermatrix: %s", supermatrix)
     logger.info("Partitions file: %s", partitions)
 
@@ -5169,7 +5184,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run IQ-TREE on concatenated supermatrix (default: on)",
     )
     p_mt.add_argument("--ufboot", type=int, default=1000, help="Ultrafast bootstrap replicate number")
-    p_mt.add_argument("--threads", default="AUTO", help="Thread setting passed to iqtree -T")
+    p_mt.add_argument(
+        "--threads",
+        default="AUTO",
+        help="Unified thread setting: Pangraph uses -j, block jobs inherit it by default, and IQ-TREE uses -T",
+    )
     p_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
     p_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_mt.set_defaults(func=cmd_mt_blocks)
