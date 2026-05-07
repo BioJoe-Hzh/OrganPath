@@ -79,6 +79,11 @@ OrganPath sortOrgan \
   --min-non-n-len 8000
 ```
 
+`sortOrgan -i` accepts three input layouts:
+- an `OrganPath getOrgan` / GetOrganelle output directory with one subdirectory per sample
+- a directory containing FASTA files directly; each FASTA filename prefix becomes the sample ID
+- a single FASTA file; its filename prefix becomes the sample ID
+
 `--organelle-mode` strategies:
 - `plant_pt`: chloroplast-oriented sorting; output is rotated to seed start/orientation.
 - `plant_mt`: mitochondrial homolog filtering against seed (reduce nuclear contamination).
@@ -386,6 +391,35 @@ OrganPath RenameTree \
   -m id_map.txt \
   -o renamed.treefile
 ```
+
+Build ngsLCA-ready taxonomy from a tree + MSA (+ optional tip rename map):
+
+```bash
+OrganPath tree2taxonomy \
+  -t Salicaceae_cp_final.treefile \
+  -i Salicaceae_cp_final_MSA.fasta \
+  --tip-map tip_map.tsv \
+  --leaf-taxid-map leaf_taxid_map.tsv \
+  --base-taxonomy-tsv Populus16.taxonomy.tree.tsv \
+  -o tree2taxonomy_out
+```
+
+This writes:
+- `renamed.treefile`
+- `renamed.msa.fasta`
+- `renamed.ungapped.fasta`
+- `renamed.acc2taxid`
+- `nodes.dmp`
+- `names.dmp`
+- `clade_taxonomy.tsv`
+- `tip_name_map.audit.tsv`
+
+Key behavior:
+- if `--tip-map` is given, tree tips and MSA headers must both be fully covered by the map
+- internal node labels like `99.7/100` are kept only when all numeric parts exceed `--support-cutoff`
+- accepted internal nodes are added as `clade` taxa starting from taxid `100000000`
+- leaf taxa are re-parented to the nearest accepted clade
+- acc2tax uses the renamed tip headers and gap-free sequences
 
 ## Plant mtBlocks Workflow
 

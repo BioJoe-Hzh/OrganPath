@@ -1,5 +1,6 @@
 import argparse
 import concurrent.futures
+import csv
 import json
 import gzip
 import logging
@@ -13,7 +14,7 @@ import xml.dom.minidom as minidom
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import __version__
 
@@ -1564,6 +1565,14 @@ def cp_regions_from_sequence_with_cpstools(seq: str, sample_out: Path, sample_na
     return parse_cpstools_four_sec(four_sec)
 
 
+@dataclass
+class SortOrganSampleInput:
+    sample: str
+    candidates: List[Path]
+    fastg: Optional[Path]
+    source: str
+
+
 def resolve_cp_regions(
     seed_fa: Path,
     out_dir: Path,
@@ -1736,6 +1745,74 @@ def discover_sample_candidates(sample_dir: Path, organelle_mode: str = "generic"
         seen.add(sp)
         uniq_contigs.append(p)
     return uniq_contigs, fastg, "contigs"
+
+
+FASTA_INPUT_SUFFIXES = (".fa", ".fasta", ".fas", ".fna", ".ffn")
+
+
+def is_sortorgan_input_fasta(path: Path) -> bool:
+    name = path.name.lower()
+    return any(name.endswith(suf) for suf in FASTA_INPUT_SUFFIXES)
+
+
+def fasta_sample_prefix(path: Path) -> str:
+    name = path.name
+    lower = name.lower()
+    for suf in sorted(FASTA_INPUT_SUFFIXES, key=len, reverse=True):
+        if lower.endswith(suf):
+            return name[: -len(suf)]
+    return path.stem
+
+
+def discover_sortorgan_sample_inputs(input_path: Path, organelle_mode: str) -> List[SortOrganSampleInput]:
+    if input_path.is_file():
+        if not is_sortorgan_input_fasta(input_path):
+            raise ValueError(f"sortOrgan file input must be FASTA: {input_path}")
+        return [
+            SortOrganSampleInput(
+                sample=fasta_sample_prefix(input_path),
+                candidates=[input_path],
+                fastg=None,
+                source="input_fasta",
+            )
+        ]
+
+    root_fastas = sorted(
+        p for p in input_path.iterdir() if p.is_file() and is_sortorgan_input_fasta(p)
+    )
+    if root_fastas:
+        samples: List[SortOrganSampleInput] = []
+        seen: Dict[str, Path] = {}
+        for fa in root_fastas:
+            sample = fasta_sample_prefix(fa)
+            prev = seen.get(sample)
+            if prev is not None:
+                raise ValueError(
+                    f"Multiple FASTA files resolve to the same sample prefix '{sample}': {prev} and {fa}"
+                )
+            seen[sample] = fa
+            samples.append(
+                SortOrganSampleInput(
+                    sample=sample,
+                    candidates=[fa],
+                    fastg=None,
+                    source="input_fasta_dir",
+                )
+            )
+        return samples
+
+    sample_inputs: List[SortOrganSampleInput] = []
+    for sample_dir in sorted(p for p in input_path.iterdir() if p.is_dir()):
+        candidates, fastg, source = discover_sample_candidates(sample_dir, organelle_mode=organelle_mode)
+        sample_inputs.append(
+            SortOrganSampleInput(
+                sample=sample_dir.name,
+                candidates=candidates,
+                fastg=fastg,
+                source=source,
+            )
+        )
+    return sample_inputs
 
 
 def summarize_hit_stats(
@@ -2178,11 +2255,11 @@ def build_sample_assembly_from_contigs(
 
 
 def cmd_sort_organ(args: argparse.Namespace) -> int:
-    in_dir = Path(args.input_dir).resolve()
+    input_path = Path(args.input_dir).resolve()
     out_dir = Path(args.outdir).resolve()
     seed = Path(args.seed).resolve()
-    if not in_dir.exists():
-        raise FileNotFoundError(f"input-dir not found: {in_dir}")
+    if not input_path.exists():
+        raise FileNotFoundError(f"input path not found: {input_path}")
     if not seed.exists():
         raise FileNotFoundError(f"seed fasta not found: {seed}")
     if not (0.0 <= args.cp_exclude_min_query_cov <= 1.0):
@@ -2230,9 +2307,9 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             + region_len(*cp_regions["SSC"], total_len=len(seed_seq))
         )
 
-    sample_dirs = sorted([p for p in in_dir.iterdir() if p.is_dir()])
-    if not sample_dirs:
-        raise ValueError("No sample folders found in input-dir.")
+    sample_inputs = discover_sortorgan_sample_inputs(input_path, organelle_mode=args.organelle_mode)
+    if not sample_inputs:
+        raise ValueError("No sample folders or FASTA inputs found in input path.")
 
     summary = out_dir / "sortorgan_summary.tsv"
     all_multi = out_dir / "assembled_samples.fasta"
@@ -2246,13 +2323,15 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             "SSC": pdir / "SSC_samples.fasta",
         }
 
-    def _process_one_sample(sdir: Path) -> Dict[str, object]:
-        sample = sdir.name
+    def _process_one_sample(sample_input: SortOrganSampleInput) -> Dict[str, object]:
+        sample = sample_input.sample
         sample_out = out_dir / sample
         sample_out.mkdir(parents=True, exist_ok=True)
         proc_log = sample_out / "process.log"
         proc_lines: List[str] = []
-        candidates, fastg, source = discover_sample_candidates(sdir, organelle_mode=args.organelle_mode)
+        candidates = sample_input.candidates
+        fastg = sample_input.fastg
+        source = sample_input.source
         proc_lines.append(f"sample\t{sample}")
         proc_lines.append(f"source\t{source}")
         proc_lines.append(f"candidate_count\t{len(candidates)}")
@@ -2401,10 +2480,10 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
             )
             workers = max(1, int(getattr(args, "jobs", 1)))
             if workers == 1:
-                results = [_process_one_sample(sdir) for sdir in sample_dirs]
+                results = [_process_one_sample(sample_input) for sample_input in sample_inputs]
             else:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                    results = list(ex.map(_process_one_sample, sample_dirs))
+                    results = list(ex.map(_process_one_sample, sample_inputs))
             for rec in sorted(results, key=lambda x: str(x["sample"])):
                 sample = str(rec["sample"])
                 status = str(rec["status"])
@@ -4579,6 +4658,597 @@ def cmd_rename_tree(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass
+class TreeTaxonRow:
+    taxid: int
+    parent_taxid: int
+    rank: str
+    name: str
+
+
+@dataclass
+class TreeCladeInfo:
+    clade_obj_id: int
+    taxid: int
+    parent_taxid: int
+    rank: str
+    name: str
+    support_label: str
+    descendant_tips: List[str]
+    taxonomy_lca_taxid: int
+    nearest_parent_clade_taxid: Optional[int]
+
+
+def parse_tip_map_tsv(path: Path) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    seen_new: Dict[str, str] = {}
+    with path.open("rt") as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        for row in reader:
+            if not row or all(not x.strip() for x in row):
+                continue
+            if row[0].strip().lower() == "old":
+                continue
+            if len(row) < 2:
+                raise ValueError(f"tip map row must have at least 2 columns: {row}")
+            old = row[0].strip()
+            new = row[1].strip()
+            if not old or not new:
+                raise ValueError(f"tip map contains empty old/new value: {row}")
+            if old in mapping and mapping[old] != new:
+                raise ValueError(f"Duplicate old key with different new value: {old}")
+            prev_old = seen_new.get(new)
+            if prev_old is not None and prev_old != old:
+                raise ValueError(f"Duplicate new tip name {new} from {prev_old} and {old}")
+            mapping[old] = new
+            seen_new[new] = old
+    if not mapping:
+        raise ValueError(f"No tip mappings found in {path}")
+    return mapping
+
+
+def parse_leaf_taxid_map(path: Path) -> Dict[str, int]:
+    mapping: Dict[str, int] = {}
+    with path.open("rt") as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        for row in reader:
+            if not row or all(not x.strip() for x in row):
+                continue
+            if row[0].strip().lower() in {"tip_name", "tip", "name"}:
+                continue
+            if len(row) < 2:
+                raise ValueError(f"leaf taxid map row must have at least 2 columns: {row}")
+            name = row[0].strip()
+            try:
+                taxid = int(row[1].strip())
+            except ValueError as exc:
+                raise ValueError(f"Invalid taxid in {path}: {row}") from exc
+            if name in mapping and mapping[name] != taxid:
+                raise ValueError(f"Duplicate tip_name with different taxids: {name}")
+            mapping[name] = taxid
+    if not mapping:
+        raise ValueError(f"No leaf taxid mappings found in {path}")
+    return mapping
+
+
+def parse_tree_taxonomy_tsv(path: Path) -> Dict[int, TreeTaxonRow]:
+    rows: Dict[int, TreeTaxonRow] = {}
+    with path.open("rt") as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        for row in reader:
+            if not row or all(not x.strip() for x in row):
+                continue
+            if row[0].strip().lower() == "taxid":
+                continue
+            if len(row) < 4:
+                raise ValueError(f"Bad taxonomy TSV row: {row}")
+            taxid = int(row[0].strip())
+            parent = int(row[1].strip())
+            rank = row[2].strip()
+            name = row[3].strip()
+            rows[taxid] = TreeTaxonRow(taxid=taxid, parent_taxid=parent, rank=rank, name=name)
+    if not rows:
+        raise ValueError(f"No taxonomy rows found in {path}")
+    return rows
+
+
+def parse_dmp_field_line(line: str) -> List[str]:
+    parts = [part.strip() for part in line.rstrip("\n").split("\t|\t")]
+    if parts:
+        parts[-1] = parts[-1].removesuffix("\t|").strip()
+    return parts
+
+
+def parse_nodes_dmp_rows(path: Path) -> Dict[int, Tuple[int, str]]:
+    rows: Dict[int, Tuple[int, str]] = {}
+    with path.open("rt") as fh:
+        for raw in fh:
+            if not raw.strip():
+                continue
+            parts = parse_dmp_field_line(raw)
+            if len(parts) < 3:
+                raise ValueError(f"Bad nodes.dmp line: {raw.rstrip()}")
+            rows[int(parts[0])] = (int(parts[1]), parts[2])
+    return rows
+
+
+def parse_names_dmp_rows(path: Path) -> Dict[int, str]:
+    rows: Dict[int, str] = {}
+    with path.open("rt") as fh:
+        for raw in fh:
+            if not raw.strip():
+                continue
+            parts = parse_dmp_field_line(raw)
+            if len(parts) < 4:
+                raise ValueError(f"Bad names.dmp line: {raw.rstrip()}")
+            if parts[3] == "scientific name":
+                rows[int(parts[0])] = parts[1]
+    return rows
+
+
+def load_tree_taxonomy_base(
+    base_taxonomy_tsv: Optional[Path],
+    base_nodes: Optional[Path],
+    base_names: Optional[Path],
+) -> Dict[int, TreeTaxonRow]:
+    if base_taxonomy_tsv:
+        rows = parse_tree_taxonomy_tsv(base_taxonomy_tsv)
+    else:
+        if base_nodes or base_names:
+            if not base_nodes or not base_names:
+                raise ValueError("When using --base-nodes, both --base-nodes and --base-names are required")
+            node_rows = parse_nodes_dmp_rows(base_nodes)
+            name_rows = parse_names_dmp_rows(base_names)
+            rows = {}
+            for taxid, (parent, rank) in node_rows.items():
+                rows[taxid] = TreeTaxonRow(
+                    taxid=taxid,
+                    parent_taxid=parent,
+                    rank=rank,
+                    name=name_rows.get(taxid, str(taxid)),
+                )
+        else:
+            rows = {}
+    if 1 not in rows:
+        rows[1] = TreeTaxonRow(taxid=1, parent_taxid=1, rank="no rank", name="root")
+    return rows
+
+
+def allocate_unused_taxid(start: int, used_taxids: Set[int]) -> int:
+    taxid = start
+    while taxid in used_taxids:
+        taxid += 1
+    return taxid
+
+
+def synthesize_leaf_taxonomy(
+    tip_names: Sequence[str],
+    base_rows: Dict[int, TreeTaxonRow],
+    provided_leaf_taxid_map: Optional[Dict[str, int]],
+    leaf_taxid_start: int,
+) -> Tuple[Dict[str, int], Dict[int, TreeTaxonRow], bool]:
+    rows = dict(base_rows)
+    used_taxids = set(rows.keys())
+    leaf_map: Dict[str, int] = {}
+    auto_generated = False
+
+    if provided_leaf_taxid_map is None:
+        auto_generated = True
+        next_taxid = leaf_taxid_start
+        for tip_name in sorted(tip_names):
+            taxid = allocate_unused_taxid(next_taxid, used_taxids)
+            next_taxid = taxid + 1
+            used_taxids.add(taxid)
+            leaf_map[tip_name] = taxid
+            rows[taxid] = TreeTaxonRow(
+                taxid=taxid,
+                parent_taxid=1,
+                rank="species",
+                name=tip_name,
+            )
+        return leaf_map, rows, auto_generated
+
+    reverse_taxid_to_names: Dict[int, Set[str]] = defaultdict(set)
+    for tip_name, taxid in provided_leaf_taxid_map.items():
+        leaf_map[tip_name] = taxid
+        reverse_taxid_to_names[taxid].add(tip_name)
+
+    for taxid, names in reverse_taxid_to_names.items():
+        if taxid not in rows:
+            if len(names) > 1:
+                raise ValueError(
+                    f"leaf taxid {taxid} is shared by multiple tips {sorted(names)[:10]} but is absent from the base taxonomy. "
+                    "Provide a base taxonomy row for this taxid or use unique taxids."
+                )
+            tip_name = next(iter(names))
+            rows[taxid] = TreeTaxonRow(
+                taxid=taxid,
+                parent_taxid=1,
+                rank="species",
+                name=tip_name,
+            )
+            used_taxids.add(taxid)
+    return leaf_map, rows, auto_generated
+
+
+def rename_fasta_headers(seqs: Dict[str, str], name_map: Dict[str, str]) -> Tuple[Dict[str, str], List[str]]:
+    renamed: Dict[str, str] = {}
+    ordered_old = list(seqs.keys())
+    missing = [sid for sid in ordered_old if sid not in name_map]
+    if missing:
+        raise ValueError(f"tip map missing MSA headers: {missing[:20]}")
+    for old, seq in seqs.items():
+        new = name_map[old]
+        if new in renamed:
+            raise ValueError(f"Renamed MSA headers are not unique: {new}")
+        renamed[new] = seq
+    return renamed, ordered_old
+
+
+def ungap_fasta_records(seqs: Dict[str, str]) -> Dict[str, str]:
+    return {sid: seq.replace("-", "") for sid, seq in seqs.items()}
+
+
+def tree_parent_map(tree) -> Dict[int, Optional[object]]:
+    parents: Dict[int, Optional[object]] = {}
+    for parent in tree.find_clades(order="preorder"):
+        for child in parent.clades:
+            parents[id(child)] = parent
+    parents[id(tree.root)] = None
+    return parents
+
+
+def parse_support_values(label: Optional[str]) -> Optional[List[float]]:
+    if label is None:
+        return None
+    text = str(label).strip()
+    if not text:
+        return None
+    vals: List[float] = []
+    for part in [p.strip() for p in text.split("/") if p.strip()]:
+        try:
+            vals.append(float(part))
+        except ValueError:
+            return None
+    return vals if vals else None
+
+
+def support_passes_cutoff(label: Optional[str], cutoff: float) -> bool:
+    vals = parse_support_values(label)
+    if not vals:
+        return False
+    return all(v > cutoff for v in vals)
+
+
+def lineage_to_root_taxids(taxid: int, rows: Dict[int, TreeTaxonRow]) -> List[int]:
+    lineage: List[int] = []
+    seen = set()
+    current = taxid
+    while True:
+        if current in seen:
+            raise ValueError(f"Cycle detected in taxonomy at taxid {current}")
+        seen.add(current)
+        lineage.append(current)
+        row = rows.get(current)
+        if row is None or row.parent_taxid == current:
+            break
+        current = row.parent_taxid
+    return lineage
+
+
+def taxonomy_lca_taxid(taxids: Sequence[int], rows: Dict[int, TreeTaxonRow]) -> int:
+    if not taxids:
+        raise ValueError("Cannot compute taxonomy LCA from empty taxid set")
+    lineages = [list(reversed(lineage_to_root_taxids(tid, rows))) for tid in taxids]
+    shared: List[int] = []
+    for group in zip(*lineages):
+        if len(set(group)) == 1:
+            shared.append(group[0])
+        else:
+            break
+    return shared[-1] if shared else 1
+
+
+def build_clade_infos_from_tree(
+    tree,
+    parent_map: Dict[int, Optional[object]],
+    leaf_taxids: Dict[str, int],
+    base_rows: Dict[int, TreeTaxonRow],
+    support_cutoff: float,
+    clade_taxid_start: int,
+    clade_rank: str,
+    clade_name_prefix: str,
+) -> List[TreeCladeInfo]:
+    qualifying_nodes = [
+        clade
+        for clade in tree.find_clades(order="preorder")
+        if clade.clades and support_passes_cutoff(clade.name, support_cutoff)
+    ]
+    assigned_taxids: Dict[int, int] = {}
+    infos: List[TreeCladeInfo] = []
+    next_taxid = clade_taxid_start
+    for idx, clade in enumerate(qualifying_nodes, start=1):
+        current_taxid = next_taxid
+        next_taxid += 1
+        assigned_taxids[id(clade)] = current_taxid
+        descendant_tips = sorted(t.name for t in clade.get_terminals())
+        descendant_taxids = [leaf_taxids[name] for name in descendant_tips]
+        lca_taxid = taxonomy_lca_taxid(descendant_taxids, base_rows)
+        anc = parent_map[id(clade)]
+        parent_clade_taxid: Optional[int] = None
+        while anc is not None:
+            maybe = assigned_taxids.get(id(anc))
+            if maybe is not None:
+                parent_clade_taxid = maybe
+                break
+            anc = parent_map.get(id(anc))
+        parent_taxid = parent_clade_taxid if parent_clade_taxid is not None else lca_taxid
+        infos.append(
+            TreeCladeInfo(
+                clade_obj_id=id(clade),
+                taxid=current_taxid,
+                parent_taxid=parent_taxid,
+                rank=clade_rank,
+                name=f"{clade_name_prefix}_{idx:06d}",
+                support_label=str(clade.name),
+                descendant_tips=descendant_tips,
+                taxonomy_lca_taxid=lca_taxid,
+                nearest_parent_clade_taxid=parent_clade_taxid,
+            )
+        )
+    return infos
+
+
+def nearest_clade_taxid_for_tip(
+    tip,
+    parent_map: Dict[int, Optional[object]],
+    clade_taxid_by_obj_id: Dict[int, int],
+) -> Optional[int]:
+    current = parent_map.get(id(tip))
+    while current is not None:
+        maybe = clade_taxid_by_obj_id.get(id(current))
+        if maybe is not None:
+            return maybe
+        current = parent_map.get(id(current))
+    return None
+
+
+def reparent_leaf_taxa_to_clades(
+    tree,
+    parent_map: Dict[int, Optional[object]],
+    clade_infos: Sequence[TreeCladeInfo],
+    leaf_taxid_map: Dict[str, int],
+    rows: Dict[int, TreeTaxonRow],
+) -> None:
+    clade_taxid_by_obj_id = {info.clade_obj_id: info.taxid for info in clade_infos}
+    desired_parents: Dict[int, int] = {}
+    for tip in tree.get_terminals():
+        tip_name = tip.name
+        leaf_taxid = leaf_taxid_map[tip_name]
+        desired_parent = nearest_clade_taxid_for_tip(tip, parent_map, clade_taxid_by_obj_id)
+        if desired_parent is None:
+            desired_parent = rows[leaf_taxid].parent_taxid
+        prev = desired_parents.get(leaf_taxid)
+        if prev is not None and prev != desired_parent:
+            raise ValueError(
+                f"Leaf taxid {leaf_taxid} maps to multiple tree contexts with conflicting parents "
+                f"{prev} and {desired_parent}. Tip example: {tip_name}"
+            )
+        desired_parents[leaf_taxid] = desired_parent
+    for leaf_taxid, parent_taxid in desired_parents.items():
+        row = rows[leaf_taxid]
+        rows[leaf_taxid] = TreeTaxonRow(
+            taxid=row.taxid,
+            parent_taxid=parent_taxid,
+            rank=row.rank,
+            name=row.name,
+        )
+
+
+def write_tree_taxonomy_nodes_dmp(path: Path, rows: Iterable[TreeTaxonRow]) -> None:
+    with path.open("wt") as out:
+        for row in sorted(rows, key=lambda r: r.taxid):
+            out.write(
+                f"{row.taxid}\t|\t{row.parent_taxid}\t|\t{row.rank}\t|\t\t|\t0\t|\t0\t|\t11\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|\n"
+            )
+
+
+def write_tree_taxonomy_names_dmp(path: Path, rows: Iterable[TreeTaxonRow]) -> None:
+    with path.open("wt") as out:
+        for row in sorted(rows, key=lambda r: r.taxid):
+            out.write(f"{row.taxid}\t|\t{row.name}\t|\t\t|\tscientific name\t|\n")
+
+
+def write_tree2tax_tip_audit(
+    path: Path,
+    tree_old: Sequence[str],
+    msa_old: Sequence[str],
+    tip_map: Dict[str, str],
+    leaf_taxid_map: Dict[str, int],
+) -> None:
+    tree_set = set(tree_old)
+    msa_set = set(msa_old)
+    all_old = sorted(set(tree_old) | set(msa_old))
+    with path.open("wt") as out:
+        out.write("old\tnew\tin_tree\tin_msa\thas_leaf_taxid\tleaf_taxid\n")
+        for old in all_old:
+            new = tip_map.get(old, old)
+            taxid = leaf_taxid_map.get(new)
+            out.write(
+                f"{old}\t{new}\t{int(old in tree_set)}\t{int(old in msa_set)}\t{int(taxid is not None)}\t{taxid if taxid is not None else ''}\n"
+            )
+
+
+def write_tree2tax_acc2taxid(path: Path, seqs: Dict[str, str], leaf_taxid_map: Dict[str, int]) -> None:
+    with path.open("wt") as out:
+        out.write("accession\taccession.version\ttaxid\tgi\n")
+        for sid in sorted(seqs.keys()):
+            taxid = leaf_taxid_map[sid]
+            out.write(f"{sid}\t{sid}\t{taxid}\t{taxid}\n")
+
+
+def write_tree2tax_clade_audit(path: Path, infos: Sequence[TreeCladeInfo]) -> None:
+    with path.open("wt") as out:
+        out.write(
+            "taxid\tparent_taxid\trank\tname\tsupport_label\tdescendant_count\ttaxonomy_lca_taxid\tnearest_parent_clade_taxid\tdescendants\n"
+        )
+        for info in sorted(infos, key=lambda x: x.taxid):
+            out.write(
+                f"{info.taxid}\t{info.parent_taxid}\t{info.rank}\t{info.name}\t{info.support_label}\t"
+                f"{len(info.descendant_tips)}\t{info.taxonomy_lca_taxid}\t"
+                f"{info.nearest_parent_clade_taxid if info.nearest_parent_clade_taxid is not None else ''}\t"
+                f"{';'.join(info.descendant_tips)}\n"
+            )
+
+
+def cmd_tree2taxonomy(args: argparse.Namespace) -> int:
+    try:
+        from Bio import Phylo
+    except ImportError as exc:
+        raise RuntimeError("Biopython is required for tree2taxonomy. Please install biopython.") from exc
+
+    tree_in = Path(args.tree).resolve()
+    msa_in = Path(args.msa).resolve()
+    out_dir = Path(args.outdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not tree_in.exists():
+        raise FileNotFoundError(f"Tree not found: {tree_in}")
+    if not msa_in.exists():
+        raise FileNotFoundError(f"MSA not found: {msa_in}")
+    leaf_taxid_map_path = Path(args.leaf_taxid_map).resolve() if args.leaf_taxid_map else None
+    if leaf_taxid_map_path and not leaf_taxid_map_path.exists():
+        raise FileNotFoundError(f"Leaf taxid map not found: {leaf_taxid_map_path}")
+    if args.tip_map and not Path(args.tip_map).resolve().exists():
+        raise FileNotFoundError(f"Tip map not found: {Path(args.tip_map).resolve()}")
+    if args.base_taxonomy_tsv and not Path(args.base_taxonomy_tsv).resolve().exists():
+        raise FileNotFoundError(f"Base taxonomy TSV not found: {Path(args.base_taxonomy_tsv).resolve()}")
+    if args.base_nodes and not Path(args.base_nodes).resolve().exists():
+        raise FileNotFoundError(f"Base nodes.dmp not found: {Path(args.base_nodes).resolve()}")
+    if args.base_names and not Path(args.base_names).resolve().exists():
+        raise FileNotFoundError(f"Base names.dmp not found: {Path(args.base_names).resolve()}")
+
+    tree = Phylo.read(str(tree_in), "newick")
+    msa = read_fasta_sequences(msa_in)
+    tree_old_tips = [tip.name for tip in tree.get_terminals()]
+    msa_old_headers = list(msa.keys())
+
+    if args.tip_map:
+        tip_map = parse_tip_map_tsv(Path(args.tip_map).resolve())
+        missing_tree = [tip for tip in tree_old_tips if tip not in tip_map]
+        missing_msa = [sid for sid in msa_old_headers if sid not in tip_map]
+        if missing_tree:
+            raise ValueError(f"tip map missing tree tips: {missing_tree[:20]}")
+        if missing_msa:
+            raise ValueError(f"tip map missing MSA headers: {missing_msa[:20]}")
+        renamed_tree_text = rename_newick_tips(tree_in.read_text(), tip_map)
+        renamed_tree_path = out_dir / "renamed.treefile"
+        renamed_tree_path.write_text(renamed_tree_text)
+        tree = Phylo.read(str(renamed_tree_path), "newick")
+        renamed_msa, _ = rename_fasta_headers(msa, tip_map)
+    else:
+        tip_map = {sid: sid for sid in sorted(set(tree_old_tips) | set(msa_old_headers))}
+        renamed_tree_path = out_dir / "renamed.treefile"
+        Phylo.write(tree, str(renamed_tree_path), "newick")
+        renamed_msa = dict(msa)
+
+    renamed_headers = set(renamed_msa.keys())
+    tree_tip_names = [tip.name for tip in tree.get_terminals()]
+    missing_in_msa = [tip for tip in tree_tip_names if tip not in renamed_headers]
+    extra_in_msa = sorted(name for name in renamed_headers if name not in set(tree_tip_names))
+    if missing_in_msa:
+        raise ValueError(f"Tree tip missing in renamed MSA: {missing_in_msa[:20]}")
+    if extra_in_msa:
+        raise ValueError(f"Renamed MSA contains sequences absent from tree tips: {extra_in_msa[:20]}")
+    if len(set(tree_tip_names)) != len(tree_tip_names):
+        raise ValueError("Renamed tree tips are not unique")
+    if len(renamed_headers) != len(renamed_msa):
+        raise ValueError("Renamed MSA headers are not unique")
+
+    base_rows = load_tree_taxonomy_base(
+        Path(args.base_taxonomy_tsv).resolve() if args.base_taxonomy_tsv else None,
+        Path(args.base_nodes).resolve() if args.base_nodes else None,
+        Path(args.base_names).resolve() if args.base_names else None,
+    )
+    provided_leaf_taxid_map = parse_leaf_taxid_map(leaf_taxid_map_path) if leaf_taxid_map_path else None
+    if provided_leaf_taxid_map is not None:
+        missing_leaf_taxids = sorted(name for name in renamed_headers if name not in provided_leaf_taxid_map)
+        if missing_leaf_taxids:
+            raise ValueError(f"leaf taxid map missing renamed tips: {missing_leaf_taxids[:20]}")
+
+    leaf_taxid_map, base_rows_with_leaves, auto_leaf_taxids = synthesize_leaf_taxonomy(
+        tip_names=sorted(renamed_headers),
+        base_rows=base_rows,
+        provided_leaf_taxid_map=provided_leaf_taxid_map,
+        leaf_taxid_start=args.leaf_taxid_start,
+    )
+
+    renamed_msa_path = out_dir / "renamed.msa.fasta"
+    ungapped_fasta_path = out_dir / "renamed.ungapped.fasta"
+    names_dmp_path = out_dir / "names.dmp"
+    nodes_dmp_path = out_dir / "nodes.dmp"
+    acc2taxid_path = out_dir / "renamed.acc2taxid"
+    leaf_taxid_out_path = out_dir / "leaf_taxid_map.tsv"
+    tip_audit_path = out_dir / "tip_name_map.audit.tsv"
+    clade_audit_path = out_dir / "clade_taxonomy.tsv"
+    summary_path = out_dir / "tree2taxonomy_summary.tsv"
+
+    write_fasta_sequences(renamed_msa_path, renamed_msa)
+    ungapped = ungap_fasta_records(renamed_msa)
+    write_fasta_sequences(ungapped_fasta_path, ungapped)
+
+    parent_map = tree_parent_map(tree)
+    clade_infos = build_clade_infos_from_tree(
+        tree=tree,
+        parent_map=parent_map,
+        leaf_taxids=leaf_taxid_map,
+        base_rows=base_rows_with_leaves,
+        support_cutoff=args.support_cutoff,
+        clade_taxid_start=args.clade_taxid_start,
+        clade_rank=args.clade_rank,
+        clade_name_prefix=args.clade_name_prefix,
+    )
+
+    final_rows = dict(base_rows_with_leaves)
+    for info in clade_infos:
+        final_rows[info.taxid] = TreeTaxonRow(
+            taxid=info.taxid,
+            parent_taxid=info.parent_taxid,
+            rank=info.rank,
+            name=info.name,
+        )
+
+    reparent_leaf_taxa_to_clades(
+        tree=tree,
+        parent_map=parent_map,
+        clade_infos=clade_infos,
+        leaf_taxid_map=leaf_taxid_map,
+        rows=final_rows,
+    )
+
+    write_tree2tax_acc2taxid(acc2taxid_path, ungapped, leaf_taxid_map)
+    with leaf_taxid_out_path.open("wt") as out:
+        out.write("tip_name\ttaxid\n")
+        for tip_name in sorted(leaf_taxid_map):
+            out.write(f"{tip_name}\t{leaf_taxid_map[tip_name]}\n")
+    write_tree_taxonomy_names_dmp(names_dmp_path, final_rows.values())
+    write_tree_taxonomy_nodes_dmp(nodes_dmp_path, final_rows.values())
+    write_tree2tax_tip_audit(tip_audit_path, tree_old_tips, msa_old_headers, tip_map, leaf_taxid_map)
+    write_tree2tax_clade_audit(clade_audit_path, clade_infos)
+
+    with summary_path.open("wt") as out:
+        out.write("metric\tvalue\n")
+        out.write(f"renamed_tree_tips\t{len(tree_tip_names)}\n")
+        out.write(f"renamed_msa_records\t{len(renamed_msa)}\n")
+        out.write(f"leaf_taxids_auto_generated\t{int(auto_leaf_taxids)}\n")
+        out.write(f"internal_clades_added\t{len(clade_infos)}\n")
+        out.write(f"total_taxonomy_rows\t{len(final_rows)}\n")
+        out.write(f"support_cutoff\t{args.support_cutoff}\n")
+        out.write(f"leaf_taxid_start\t{args.leaf_taxid_start}\n")
+
+    logger.info("tree2taxonomy completed: %s", out_dir)
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     missing_python: List[str] = []
     missing_tools: List[str] = []
@@ -4955,6 +5625,55 @@ def build_parser() -> argparse.ArgumentParser:
     p_rename.add_argument("-o", "--output", required=True, help="Output Newick tree file")
     p_rename.set_defaults(func=cmd_rename_tree)
 
+    p_t2t = subs.add_parser(
+        "tree2taxonomy",
+        help="Build ngsLCA-ready taxonomy, renamed FASTA, and acc2taxid from tree + MSA",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_t2t.add_argument("-t", "--tree", required=True, help="Input Newick tree file")
+    p_t2t.add_argument("-i", "--msa", required=True, help="Input aligned MSA FASTA")
+    p_t2t.add_argument(
+        "--tip-map",
+        help="Optional TSV with columns old,new used to rename tree tips and MSA headers",
+    )
+    p_t2t.add_argument(
+        "--leaf-taxid-map",
+        help="Optional TSV with columns tip_name,taxid for renamed tip headers. If omitted, OrganPath assigns synthetic leaf taxids automatically.",
+    )
+    base_group = p_t2t.add_mutually_exclusive_group(required=False)
+    base_group.add_argument(
+        "--base-taxonomy-tsv",
+        help="Optional base taxonomy TSV with columns TaxID,ParentID,Rank,Name",
+    )
+    base_group.add_argument("--base-nodes", help="Optional base nodes.dmp")
+    p_t2t.add_argument("--base-names", help="Base names.dmp (required with --base-nodes)")
+    p_t2t.add_argument("-o", "--outdir", required=True, help="Output directory")
+    p_t2t.add_argument(
+        "--support-cutoff",
+        type=float,
+        default=75.0,
+        help="Internal nodes are kept only when all numeric support values exceed this cutoff",
+    )
+    p_t2t.add_argument("--clade-rank", default="clade", help="Rank assigned to qualifying internal nodes")
+    p_t2t.add_argument(
+        "--clade-taxid-start",
+        type=int,
+        default=100000000,
+        help="Starting taxid for newly created internal clades",
+    )
+    p_t2t.add_argument(
+        "--clade-name-prefix",
+        default="clade",
+        help="Prefix for internal clade names, e.g. clade_000001",
+    )
+    p_t2t.add_argument(
+        "--leaf-taxid-start",
+        type=int,
+        default=200000000,
+        help="Starting taxid used when --leaf-taxid-map is omitted",
+    )
+    p_t2t.set_defaults(func=cmd_tree2taxonomy)
+
     p_get = subs.add_parser(
         "getOrgan",
         help="Batch assemble organellar genomes from paired-end reads with GetOrganelle",
@@ -4987,7 +5706,12 @@ def build_parser() -> argparse.ArgumentParser:
         "sortOrgan",
         help="Sort and orient assembled organellar contigs by seed; output per-sample fasta (mode defaults built-in)",
     )
-    p_sort.add_argument("-i", "--input-dir", required=True, help="Input folder from OrganPath getOrgan outputs")
+    p_sort.add_argument(
+        "-i",
+        "--input-dir",
+        required=True,
+        help="Input OrganPath getOrgan output directory, a directory containing FASTA files, or a single FASTA file",
+    )
     p_sort.add_argument("-o", "--outdir", required=True, help="Output folder for sorted assemblies")
     p_sort.add_argument("-s", "--seed", required=True, help="Seed/reference fasta used for contig ordering")
     p_sort.add_argument(
