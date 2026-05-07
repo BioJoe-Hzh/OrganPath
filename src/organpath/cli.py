@@ -968,6 +968,7 @@ def run_phyview(
     threads: str = "AUTO",
     model: str = "MFP",
     safe: bool = True,
+    outgroup: Optional[str] = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     iqtree_bin = shutil.which("iqtree2") or shutil.which("iqtree")
@@ -987,6 +988,8 @@ def run_phyview(
         "--prefix",
         str(prefix),
     ]
+    if outgroup:
+        cmd += ["-o", outgroup]
     if safe:
         cmd.append("-safe")
     run_command(cmd)
@@ -3190,6 +3193,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
             threads=args.threads,
             model=args.model,
             safe=not args.unsafe,
+            outgroup=args.outgroup,
         )
         treefile = out_dir / "ml" / "organpath_tree.treefile"
         if treefile.exists():
@@ -5546,6 +5550,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_phy.add_argument("--ufboot", type=int, default=1000, help="UFBoot replicate number (used with --run_ml)")
     p_phy.add_argument("--threads", default="AUTO", help="Thread setting for IQ-TREE -T (used with --run_ml)")
     p_phy.add_argument("--model", default="MFP", help="Model option for IQ-TREE -m (used with --run_ml)")
+    p_phy.add_argument(
+        "--outgroup",
+        help="Comma-separated outgroup taxon names passed to IQ-TREE -o for rooted ML output, e.g. OUT1,OUT2",
+    )
     mode_group = p_phy.add_mutually_exclusive_group(required=True)
     mode_group.add_argument("--run_ml", "--run-ml", action="store_true", help="Run ML tree (IQ-TREE)")
     mode_group.add_argument("--run_nj", "--run-nj", action="store_true", help="Run pairwise distance + NJ tree")

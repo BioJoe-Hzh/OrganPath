@@ -204,6 +204,19 @@ OrganPath PhyView \
   --model MFP
 ```
 
+Specify one or more outgroups for IQ-TREE rooted output:
+
+```bash
+OrganPath PhyView \
+  -i align_out/trimmed.fasta \
+  -o phyview_ml \
+  --run_ml \
+  --outgroup OUTGROUP_1,OUTGROUP_2 \
+  --threads AUTO \
+  --ufboot 3000 \
+  --model MFP
+```
+
 Prepare Pathphynder panel files from VCF + tree:
 
 ```bash
