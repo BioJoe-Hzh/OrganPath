@@ -527,6 +527,7 @@ def ensure_tool(name: str) -> str:
         install_hint = {
             "mafft": "Please install MAFFT and ensure `mafft` is in PATH.",
             "trimal": "Please install trimAl and ensure `trimal` is in PATH.",
+            "clipkit": "Please install ClipKIT and ensure `clipkit` is in PATH.",
             "iqtree": "Please install IQ-TREE (iqtree/iqtree2) and ensure it is in PATH.",
             "iqtree2": "Please install IQ-TREE (iqtree/iqtree2) and ensure it is in PATH.",
             "snp-sites": "Please install snp-sites and ensure `snp-sites` is in PATH.",
@@ -546,6 +547,29 @@ def run_alignment_and_trimming(
 ) -> None:
     run_command([mafft_bin, "--auto", str(multifasta)], stdout_path=aligned)
     run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(trimmed)])
+
+
+def run_alignment_trimmer(
+    aligned: Path,
+    trimmed: Path,
+    trim_tool: str,
+    trimal_bin: str,
+    clipkit_bin: str,
+    clipkit_mode: str,
+    clipkit_log: bool,
+) -> None:
+    if trim_tool == "trimal":
+        tool = ensure_tool(trimal_bin)
+        run_command([tool, "-automated1", "-in", str(aligned), "-out", str(trimmed)])
+        return
+    if trim_tool == "clipkit":
+        tool = ensure_tool(clipkit_bin)
+        cmd = [tool, str(aligned), "-m", clipkit_mode, "-o", str(trimmed)]
+        if clipkit_log:
+            cmd.append("-l")
+        run_command(cmd)
+        return
+    raise ValueError(f"Unsupported trim tool: {trim_tool}")
 
 
 def run_alignment_with_direction(
@@ -4446,13 +4470,36 @@ def cmd_align(args: argparse.Namespace) -> int:
         )
 
         if args.trim:
-            trimal_bin = ensure_tool(args.trimal_bin)
             lsc_pre = out_dir / "LSC.trimmed.pre.fasta"
             ir_pre = out_dir / "IR.trimmed.pre.fasta"
             ssc_pre = out_dir / "SSC.trimmed.pre.fasta"
-            run_command([trimal_bin, "-automated1", "-in", str(filtered_aln["LSC"]), "-out", str(lsc_pre)])
-            run_command([trimal_bin, "-automated1", "-in", str(filtered_aln["IR"]), "-out", str(ir_pre)])
-            run_command([trimal_bin, "-automated1", "-in", str(filtered_aln["SSC"]), "-out", str(ssc_pre)])
+            run_alignment_trimmer(
+                aligned=filtered_aln["LSC"],
+                trimmed=lsc_pre,
+                trim_tool=args.trim_tool,
+                trimal_bin=args.trimal_bin,
+                clipkit_bin=args.clipkit_bin,
+                clipkit_mode=args.clipkit_mode,
+                clipkit_log=args.clipkit_log,
+            )
+            run_alignment_trimmer(
+                aligned=filtered_aln["IR"],
+                trimmed=ir_pre,
+                trim_tool=args.trim_tool,
+                trimal_bin=args.trimal_bin,
+                clipkit_bin=args.clipkit_bin,
+                clipkit_mode=args.clipkit_mode,
+                clipkit_log=args.clipkit_log,
+            )
+            run_alignment_trimmer(
+                aligned=filtered_aln["SSC"],
+                trimmed=ssc_pre,
+                trim_tool=args.trim_tool,
+                trimal_bin=args.trimal_bin,
+                clipkit_bin=args.clipkit_bin,
+                clipkit_mode=args.clipkit_mode,
+                clipkit_log=args.clipkit_log,
+            )
 
             trimmed_pre = out_dir / "trimmed.pre.fasta"
             concatenate_three_partition_alignments(
@@ -4528,10 +4575,17 @@ def cmd_align(args: argparse.Namespace) -> int:
             threads=args.threads,
         )
     if args.trim:
-        trimal_bin = ensure_tool(args.trimal_bin)
         pre_trim = out_dir / "trimmed.pre.fasta"
         trimmed = out_dir / "trimmed.fasta"
-        run_command([trimal_bin, "-automated1", "-in", str(aligned), "-out", str(pre_trim)])
+        run_alignment_trimmer(
+            aligned=aligned,
+            trimmed=pre_trim,
+            trim_tool=args.trim_tool,
+            trimal_bin=args.trimal_bin,
+            clipkit_bin=args.clipkit_bin,
+            clipkit_mode=args.clipkit_mode,
+            clipkit_log=args.clipkit_log,
+        )
         if args.max_missing_frac < 1.0 or args.snp_only:
             kept, total = filter_alignment_sites(
                 in_fa=pre_trim,
@@ -5564,7 +5618,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_align = subs.add_parser(
         "align",
-        help="Panel: align multifasta with MAFFT and optional trimAl trimming",
+        help="Panel: align multifasta with MAFFT and optional trimAl/ClipKIT trimming",
     )
     p_align.add_argument(
         "-i",
@@ -5588,6 +5642,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run trimAl after MAFFT",
     )
     p_align.add_argument("--trimal-bin", default="trimal", help="trimAl executable name/path")
+    p_align.add_argument(
+        "--trim-tool",
+        choices=["trimal", "clipkit"],
+        default="trimal",
+        help="Trimming tool used when --trim is enabled",
+    )
+    p_align.add_argument("--clipkit-bin", default="clipkit", help="ClipKIT executable name/path")
+    p_align.add_argument(
+        "--clipkit-mode",
+        default="smart-gap",
+        help="ClipKIT mode passed with -m, e.g. smart-gap, gappy, kpic, kpic-smart-gap",
+    )
+    p_align.add_argument(
+        "--clipkit-log",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Pass -l to ClipKIT to write site trimming logs",
+    )
     p_align.add_argument(
         "--max-missing-frac",
         type=float,

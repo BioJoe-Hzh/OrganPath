@@ -177,6 +177,21 @@ In partition mode, OrganPath now does:
 - write `partition_sample_filter.tsv` with KEEP/DROP decision before trim
 - if MAFFT adds `_R_` prefixes during auto-reverse, OrganPath normalizes sample IDs back before filtering/concatenation
 
+Use ClipKIT instead of trimAl when trimming:
+
+```bash
+OrganPath align \
+  -i sortorgan_out \
+  -o align_clipkit_out \
+  --plant-pt-partition \
+  --auto-reverse \
+  --trim-tool clipkit \
+  --clipkit-mode smart-gap \
+  --clipkit-log \
+  --max-missing-frac 0.5 \
+  --threads 48
+```
+
 Step 4 (Panel): ML tree from trimmed alignment:
 
 ```bash
