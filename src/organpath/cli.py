@@ -1923,6 +1923,7 @@ def map_hits_for_candidate(
     min_len: int,
     aligner: str,
     tmp_prefix: Path,
+    best_only: bool = True,
 ) -> Tuple[List[Tuple[str, int, int, str, float, int, int, int]], str]:
     tool = aligner
     if tool == "auto":
@@ -1953,7 +1954,10 @@ def map_hits_for_candidate(
         tmp.unlink(missing_ok=True)
     except Exception:
         pass
-    return choose_best_hits(hits), tool
+    if best_only:
+        return choose_best_hits(hits), tool
+    hits.sort(key=lambda x: (x[1], x[2], x[0], x[6], x[7]))
+    return hits, tool
 
 
 def canonical_fasta_key(path: Path) -> str:
@@ -2416,6 +2420,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 min_len=min_len,
                 aligner=args.aligner,
                 tmp_prefix=sample_out / f"{sample}.summary",
+                best_only=False,
             )
             ref_covered_bp, mean_identity, aligned_bp = summarize_hit_stats(stat_hits, ref_len=len(seed_seq))
             ref_covered_frac = (ref_covered_bp / len(seed_seq)) if len(seed_seq) > 0 else 0.0
