@@ -2128,6 +2128,18 @@ def build_sample_assembly_from_contigs(
         expected_ssc = region_len(*cp_regions["SSC"], total_len=ref_total)
         expected_ir = region_len(*cp_regions[ir_name], total_len=ref_total)
         expected_one_ir = expected_lsc + expected_ir + expected_ssc
+        all_seed_hits, _ = map_hits_for_candidate(
+            contig_fa=contig_fa,
+            seed_fa=seed_fa,
+            min_identity=min_identity,
+            min_len=min_len,
+            aligner=aligner,
+            tmp_prefix=out_dir / f"{sample_name}.all_hsp",
+            best_only=False,
+        )
+        all_ref_covered_bp, _all_mean_ident, _all_aligned_bp = summarize_hit_stats(
+            all_seed_hits, ref_len=ref_total
+        )
 
         complete_seq: Optional[str] = None
         complete_parts: Optional[Dict[str, str]] = None
@@ -2135,7 +2147,9 @@ def build_sample_assembly_from_contigs(
         if len(chosen) == 1:
             cid, _sstart, _send, strand, _ident, _alen, _qstart, _qend = chosen[0]
             cseq = contigs.get(cid, "")
-            if len(cseq) >= int(expected_one_ir * pt_complete_min_frac):
+            complete_by_len = len(cseq) >= int(expected_one_ir * pt_complete_min_frac)
+            complete_by_refcov = all_ref_covered_bp >= int(expected_one_ir * pt_complete_min_frac)
+            if complete_by_len or complete_by_refcov:
                 try:
                     samp_regions = cp_regions_from_sequence_with_cpstools(
                         cseq, sample_out=out_dir, sample_name=sample_name, cpstools_bin=cpstools_bin
@@ -2151,7 +2165,8 @@ def build_sample_assembly_from_contigs(
                                 complete_parts[pname] = oseq
                                 orient_notes.append(f"{pname}:{odir}")
                     complete_seq = complete_parts["LSC"] + complete_parts["IR"] + complete_parts["SSC"]
-                    complete_note = f"type:complete;single_ir:{kept_ir}"
+                    complete_basis = "len" if complete_by_len else "refcov"
+                    complete_note = f"type:complete;single_ir:{kept_ir};complete_basis:{complete_basis};all_hsp_ref_covered_bp:{all_ref_covered_bp}"
                     if orient_notes:
                         complete_note += ";part_orient:" + ",".join(orient_notes)
                 except Exception as exc:
@@ -2172,7 +2187,8 @@ def build_sample_assembly_from_contigs(
         # Fragmented route
         region_order = ["LSC", ir_name, "SSC"]
         region_hits: Dict[str, List[Tuple[str, int, int, str, float, int, int, int]]] = {r: [] for r in region_order}
-        for h in chosen:
+        fragment_hits = all_seed_hits if len(contigs) == 1 else chosen
+        for h in fragment_hits:
             cid, sstart, send, strand, ident, alen, qstart, qend = h
             if alen < pt_fragment_min_len:
                 continue
