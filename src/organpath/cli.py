@@ -5712,7 +5712,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_align.add_argument(
         "--partition-max-missing-frac",
         type=float,
-        default=0.2,
+        default=1.0,
         help="In --plant-pt-partition mode, drop a sample if any partition missing fraction exceeds this threshold (applied right after MAFFT)",
     )
     p_align.set_defaults(func=cmd_align)

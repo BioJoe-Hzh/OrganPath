@@ -170,7 +170,7 @@ OrganPath align \
 
 In partition mode, OrganPath now does:
 - MAFFT on `LSC/IR/SSC` separately
-- immediately drop samples with high per-partition missing (`--partition-max-missing-frac`, default `0.2`)
+- optionally drop samples with high per-partition missing (`--partition-max-missing-frac`, default `1.0`)
 - trim/filter each partition separately
 - concatenate partitions to final `aligned.fasta` and `trimmed.fasta`
 - write `partition_sample_stats.tsv` with per-sample/per-partition missing rate and non-missing length
