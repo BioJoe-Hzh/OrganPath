@@ -2654,6 +2654,48 @@ def infer_mtblocks_sample_map_from_fasta(input_fa: Path) -> Dict[str, str]:
     return {rid: sample_name_from_contig_record_id(rid) for rid in seqs}
 
 
+def sequence_identity_ignore_missing(seq1: str, seq2: str) -> float:
+    valid = 0
+    matches = 0
+    bases = {"A", "C", "G", "T"}
+    for a, b in zip(seq1.upper(), seq2.upper()):
+        if a not in bases or b not in bases:
+            continue
+        valid += 1
+        if a == b:
+            matches += 1
+    return (matches / valid) if valid > 0 else 0.0
+
+
+def choose_most_similar_duplicate_sequence(
+    sample: str,
+    candidates: List[Tuple[str, str]],
+    grouped_unique: Dict[str, List[Tuple[str, str]]],
+) -> Tuple[str, str, float]:
+    other_seqs = [
+        seq
+        for other_sample, items in grouped_unique.items()
+        if other_sample != sample
+        for _rid, seq in items
+    ]
+    best_rid = candidates[0][0]
+    best_seq = candidates[0][1]
+    best_score = -1.0
+    best_non_n = -1
+    for rid, seq in candidates:
+        if other_seqs:
+            score = sum(sequence_identity_ignore_missing(seq, other) for other in other_seqs) / len(other_seqs)
+        else:
+            score = 0.0
+        seq_non_n = non_n_length(seq)
+        if (score, seq_non_n, rid) > (best_score, best_non_n, best_rid):
+            best_rid = rid
+            best_seq = seq
+            best_score = score
+            best_non_n = seq_non_n
+    return best_rid, best_seq, best_score
+
+
 def collapse_block_to_sample_fasta(
     block_fa: Path,
     out_fa: Path,
@@ -2668,24 +2710,35 @@ def collapse_block_to_sample_fasta(
             sample = sample_map.get(source_id, sample_map.get(sample, sample))
         grouped[sample].append((source_id, seq))
 
+    grouped_unique: Dict[str, List[Tuple[str, str]]] = {}
+    for sample, items in grouped.items():
+        items.sort(key=lambda x: x[0])
+        uniq_items: List[Tuple[str, str]] = []
+        seen = set()
+        for rid, seq in items:
+            if seq not in seen:
+                seen.add(seq)
+                uniq_items.append((rid, seq))
+        grouped_unique[sample] = uniq_items
+
     collapsed: Dict[str, str] = {}
     duplicate_samples: List[str] = []
     conflicting_samples: List[str] = []
     short_filtered_samples: List[str] = []
     for sample, items in grouped.items():
-        items.sort(key=lambda x: x[0])
-        uniq_seqs = []
-        seen = set()
-        for _rid, seq in items:
-            if seq not in seen:
-                seen.add(seq)
-                uniq_seqs.append(seq)
         if len(items) > 1:
             duplicate_samples.append(f"{sample}:{len(items)}")
-        if len(uniq_seqs) > 1:
-            conflicting_samples.append(f"{sample}:{len(uniq_seqs)}")
+        uniq_items = grouped_unique[sample]
+        if len(uniq_items) > 1:
+            kept_rid, kept_seq, kept_score = choose_most_similar_duplicate_sequence(
+                sample=sample,
+                candidates=uniq_items,
+                grouped_unique=grouped_unique,
+            )
+            conflicting_samples.append(f"{sample}:{len(uniq_items)}->kept:{kept_rid}:mean_identity={kept_score:.3f}")
+            collapsed[sample] = kept_seq
             continue
-        collapsed[sample] = uniq_seqs[0]
+        collapsed[sample] = uniq_items[0][1]
 
     non_n_lengths = [non_n_length(seq) for seq in collapsed.values()]
     mean_non_n = (sum(non_n_lengths) / len(non_n_lengths)) if non_n_lengths else 0.0
@@ -2731,6 +2784,61 @@ def summarize_alignment_missing(path: Path) -> Tuple[int, int, float]:
     return sample_count, aln_len, missing_frac
 
 
+def filter_alignment_samples_by_quality(
+    in_fa: Path,
+    out_fa: Path,
+    min_identity: float,
+    min_cover_frac: float,
+) -> Tuple[int, int, List[str]]:
+    seqs = read_fasta_sequences(in_fa)
+    if not seqs:
+        write_fasta_sequences(out_fa, {})
+        return 0, 0, []
+    lengths = {len(v) for v in seqs.values()}
+    if len(lengths) != 1:
+        raise ValueError(f"Alignment has inconsistent sequence lengths: {in_fa}")
+    aln_len = next(iter(lengths))
+    bases = {"A", "C", "G", "T"}
+    consensus: List[str] = []
+    for i in range(aln_len):
+        counts: Dict[str, int] = defaultdict(int)
+        for seq in seqs.values():
+            b = seq[i].upper()
+            if b in bases:
+                counts[b] += 1
+        if counts:
+            consensus.append(max(counts.items(), key=lambda x: (x[1], x[0]))[0])
+        else:
+            consensus.append("N")
+
+    kept: Dict[str, str] = {}
+    removed: List[str] = []
+    for sample, seq in seqs.items():
+        seq_u = seq.upper()
+        called = 0
+        comparable = 0
+        matches = 0
+        for i, b in enumerate(seq_u):
+            if b not in bases:
+                continue
+            called += 1
+            c = consensus[i]
+            if c not in bases:
+                continue
+            comparable += 1
+            if b == c:
+                matches += 1
+        cover_frac = (called / aln_len) if aln_len > 0 else 0.0
+        identity = (matches / comparable) if comparable > 0 else 0.0
+        if cover_frac < min_cover_frac or identity < min_identity:
+            removed.append(f"{sample}:identity={identity:.3f},cover={cover_frac:.3f}")
+            continue
+        kept[sample] = seq
+
+    write_fasta_sequences(out_fa, kept)
+    return len(seqs), len(kept), removed
+
+
 def process_mt_block(
     block_fa: Path,
     out_dir: Path,
@@ -2740,6 +2848,8 @@ def process_mt_block(
     total_samples: int,
     max_missing_frac: float,
     min_sample_frac: float,
+    min_sample_identity: float,
+    min_sample_cover_frac: float,
     snp_only: bool,
     min_sites: int,
 ) -> Dict[str, object]:
@@ -2752,6 +2862,7 @@ def process_mt_block(
         "duplicate_samples": "-",
         "conflicting_samples": "-",
         "short_filtered_samples": "-",
+        "quality_filtered_samples": "-",
         "aligned_len": 0,
         "trimmed_len": 0,
         "kept_sites": 0,
@@ -2773,15 +2884,9 @@ def process_mt_block(
     seqs = read_fasta_sequences(mapped_block)
     write_fasta_sequences(collapsed_in, seqs)
     result["raw_records"] = raw_records
-    result["presence_samples"] = collapsed_samples
-    result["presence_frac"] = (collapsed_samples / total_samples) if total_samples > 0 else 0.0
     result["duplicate_samples"] = ",".join(duplicate_samples) if duplicate_samples else "-"
     result["conflicting_samples"] = ",".join(conflicting_samples) if conflicting_samples else "-"
     result["short_filtered_samples"] = ",".join(short_filtered_samples) if short_filtered_samples else "-"
-    if result["presence_frac"] < min_sample_frac:
-        result["status"] = "SKIP"
-        result["message"] = f"sample_presence<{min_sample_frac:.2f}"
-        return result
     if collapsed_samples < 2:
         result["status"] = "SKIP"
         result["message"] = "too_few_samples<2"
@@ -2789,6 +2894,7 @@ def process_mt_block(
 
     aln = out_dir / f"{block_fa.stem}.aln.fasta"
     trimmed = out_dir / f"{block_fa.stem}.trim.fasta"
+    sample_filtered = out_dir / f"{block_fa.stem}.sample_filtered.fasta"
     final_block = out_dir / f"{block_fa.stem}.final.fasta"
 
     try:
@@ -2812,20 +2918,49 @@ def process_mt_block(
             message_bits.append(f"multicopy_removed:{len(conflicting_samples)}")
         if short_filtered_samples:
             message_bits.append(f"short_removed:{len(short_filtered_samples)}")
+        _pre_quality_samples, quality_kept_samples, quality_filtered_samples = filter_alignment_samples_by_quality(
+            in_fa=trimmed,
+            out_fa=sample_filtered,
+            min_identity=min_sample_identity,
+            min_cover_frac=min_sample_cover_frac,
+        )
+        result["presence_samples"] = quality_kept_samples
+        result["presence_frac"] = (quality_kept_samples / total_samples) if total_samples > 0 else 0.0
+        result["quality_filtered_samples"] = ",".join(quality_filtered_samples) if quality_filtered_samples else "-"
+        if quality_filtered_samples:
+            message_bits.append(f"quality_removed:{len(quality_filtered_samples)}")
         if message_bits:
             result["message"] = ";".join(message_bits)
 
+        if result["presence_frac"] < min_sample_frac:
+            result["status"] = "SKIP"
+            result["message"] = (
+                f"{result['message']};sample_presence_after_quality<{min_sample_frac:.2f}"
+                if result["message"] != "-"
+                else f"sample_presence_after_quality<{min_sample_frac:.2f}"
+            )
+            return result
+
+        if quality_kept_samples < 2:
+            result["status"] = "SKIP"
+            result["message"] = (
+                f"{result['message']};too_few_samples_after_quality<2"
+                if result["message"] != "-"
+                else "too_few_samples_after_quality<2"
+            )
+            return result
+
         if max_missing_frac < 1.0 or snp_only:
             kept_sites, _total_sites = filter_alignment_sites(
-                in_fa=trimmed,
+                in_fa=sample_filtered,
                 out_fa=final_block,
                 max_missing_frac=max_missing_frac,
                 snp_only=snp_only,
             )
             result["kept_sites"] = kept_sites
         else:
-            shutil.copyfile(trimmed, final_block)
-            result["kept_sites"] = trimmed_len
+            shutil.copyfile(sample_filtered, final_block)
+            result["kept_sites"] = summarize_alignment_missing(sample_filtered)[1]
 
         final_samples, final_len, final_missing_frac = summarize_alignment_missing(final_block)
         result["final_samples"] = final_samples
@@ -3106,6 +3241,10 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         raise ValueError("--block-min-sample-frac must be within [0,1]")
     if not (0.0 <= args.sample_min_ref_cover_frac <= 1.0):
         raise ValueError("--sample-min-ref-cover-frac must be within [0,1]")
+    if not (0.0 <= args.block_sample_min_identity <= 1.0):
+        raise ValueError("--block-sample-min-identity must be within [0,1]")
+    if not (0.0 <= args.block_sample_min_cover_frac <= 1.0):
+        raise ValueError("--block-sample-min-cover-frac must be within [0,1]")
     if args.block_min_sites < 1:
         raise ValueError("--block-min-sites must be >= 1")
 
@@ -3146,7 +3285,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
     workers = max(1, min(block_jobs, len(block_fastas)))
     with (out_dir / "mtblocks_summary.tsv").open("wt") as sumf:
         sumf.write(
-            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\tconflicting_samples\tshort_filtered_samples\t"
+            "block_file\tstatus\traw_records\tpresence_samples\tpresence_frac\tduplicate_samples\tconflicting_samples\tshort_filtered_samples\tquality_filtered_samples\t"
             "aligned_len\ttrimmed_len\tkept_sites\tfinal_samples\tfinal_len\tfinal_missing_frac\ttrimmed_block\tmessage\n"
         )
         if workers == 1:
@@ -3160,6 +3299,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                     total_samples=total_samples,
                     max_missing_frac=args.block_max_missing_frac,
                     min_sample_frac=args.block_min_sample_frac,
+                    min_sample_identity=args.block_sample_min_identity,
+                    min_sample_cover_frac=args.block_sample_min_cover_frac,
                     snp_only=args.block_snp_only,
                     min_sites=args.block_min_sites,
                 )
@@ -3178,6 +3319,8 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
                         total_samples,
                         args.block_max_missing_frac,
                         args.block_min_sample_frac,
+                        args.block_sample_min_identity,
+                        args.block_sample_min_cover_frac,
                         args.block_snp_only,
                         args.block_min_sites,
                     )
@@ -3195,6 +3338,7 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
             sumf.write(
                 f"{rec['block_file']}\t{rec['status']}\t{rec['raw_records']}\t{rec['presence_samples']}\t"
                 f"{float(rec['presence_frac']):.4f}\t{rec['duplicate_samples']}\t{rec['conflicting_samples']}\t{rec['short_filtered_samples']}\t"
+                f"{rec['quality_filtered_samples']}\t"
                 f"{rec['aligned_len']}\t{rec['trimmed_len']}\t{rec['kept_sites']}\t"
                 f"{rec['final_samples']}\t{rec['final_len']}\t{float(rec['final_missing_frac']):.4f}\t"
                 f"{rec['trimmed_block']}\t{rec['message']}\n"
@@ -3321,6 +3465,8 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         block_jobs=args.block_jobs,
         block_max_missing_frac=args.block_max_missing_frac,
         block_min_sample_frac=args.block_min_sample_frac,
+        block_sample_min_identity=args.block_sample_min_identity,
+        block_sample_min_cover_frac=args.block_sample_min_cover_frac,
         block_snp_only=args.block_snp_only,
         block_min_sites=args.block_min_sites,
         run_ml=args.run_ml,
@@ -3328,6 +3474,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         threads=args.threads,
         model=args.model,
         unsafe=args.unsafe,
+        outgroup=args.outgroup,
     )
     return cmd_mt_blocks(ms)
 
@@ -5997,6 +6144,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep blocks only when at least this fraction of samples are present (default: 0.5)",
     )
     p_mt.add_argument(
+        "--block-sample-min-identity",
+        type=float,
+        default=0.85,
+        help="Within each block, drop samples whose post-trim consensus identity is below this value before block presence filtering",
+    )
+    p_mt.add_argument(
+        "--block-sample-min-cover-frac",
+        type=float,
+        default=0.5,
+        help="Within each block, drop samples whose post-trim non-missing coverage fraction is below this value before block presence filtering",
+    )
+    p_mt.add_argument(
         "--block-snp-only",
         action="store_true",
         help="Per-block post-trim site filter: keep SNP columns only",
@@ -6015,6 +6174,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Unified thread setting: Pangraph uses -j, block jobs inherit it by default, and IQ-TREE uses -T",
     )
     p_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_mt.add_argument("--outgroup", help="Comma-separated outgroup tip names passed to IQ-TREE")
     p_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_mt.set_defaults(func=cmd_mt_blocks)
 
@@ -6132,6 +6292,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep blocks only when at least this fraction of samples are present (default: 0.5)",
     )
     p_ch_mt.add_argument(
+        "--block-sample-min-identity",
+        type=float,
+        default=0.85,
+        help="Within each block, drop samples whose post-trim consensus identity is below this value before block presence filtering",
+    )
+    p_ch_mt.add_argument(
+        "--block-sample-min-cover-frac",
+        type=float,
+        default=0.5,
+        help="Within each block, drop samples whose post-trim non-missing coverage fraction is below this value before block presence filtering",
+    )
+    p_ch_mt.add_argument(
         "--block-snp-only",
         action="store_true",
         help="Per-block post-trim site filter: keep SNP columns only",
@@ -6145,6 +6317,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ch_mt.add_argument("--ufboot", type=int, default=1000, help="Ultrafast bootstrap replicate number")
     p_ch_mt.add_argument("--model", default="MFP", help="Model option passed to iqtree -m")
+    p_ch_mt.add_argument("--outgroup", help="Comma-separated outgroup tip names passed to IQ-TREE")
     p_ch_mt.add_argument("--unsafe", action="store_true", help="Disable IQ-TREE safe likelihood kernel")
     p_ch_mt.set_defaults(func=cmd_channel_plant_mt)
 

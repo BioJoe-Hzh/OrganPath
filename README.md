@@ -455,12 +455,14 @@ Key behavior:
 1. Read `sortOrgan` output directory or mt multifasta input
 2. Run `pangraph build`
 3. Run `pangraph export block-sequences`
-4. Count sample presence for each block and flag duplicated samples
-5. If one sample has duplicate identical sequences in a block, keep one copy; if duplicates differ, drop that block
-6. By default, keep only blocks present in at least 50% of samples
-7. per-block `mafft --adjustdirection` + `trimal` + optional site filtering
-8. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
-9. build a guide tree from the concatenated supermatrix with IQ-TREE
+4. Flag duplicated samples in each block
+5. If one sample has duplicate identical sequences in a block, keep one copy; if duplicates differ, keep the copy most similar to the other samples
+6. per-block `mafft --adjustdirection` + `trimal`
+7. drop low-quality samples within each block by consensus identity/coverage, then count sample presence
+8. By default, keep only blocks still present in at least 50% of samples
+9. optional site filtering
+10. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
+11. build an ML tree from the concatenated supermatrix with IQ-TREE
 
 This is the recommended plant mitochondrial route:
 - keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
@@ -493,12 +495,14 @@ Useful `mtBlocks` block filters:
 - `--threads`: one unified thread setting; Pangraph uses it, mtBlocks block-parallelism inherits it by default, and IQ-TREE also uses it
 - `--block-jobs`: optional override for per-block MAFFT/trim/filter parallelism; default inherits from `--threads`
 - `--block-min-sample-frac`: default `0.5`; keep only blocks present in at least half the samples
+- `--block-sample-min-identity`: default `0.85`; within each block, drop samples below this post-trim consensus identity before block presence filtering
+- `--block-sample-min-cover-frac`: default `0.5`; within each block, drop samples whose non-missing coverage is below this fraction before block presence filtering
 - `--block-max-missing-frac`: optional extra post-trim site filter; default is disabled so trimAl output is used directly
 - `--block-snp-only`: keep SNP columns only within each block
 - `--block-min-sites`: default `300`; skip blocks that are too short after trim/filter
 
 `mtblocks_summary.tsv` now records raw record count, unique sample count, sample presence fraction,
-duplicate-sample flags, conflicting multi-copy samples removed per block, short-sample removals,
+duplicate-sample flags, conflicting multi-copy samples removed per block, short-sample removals, quality-filtered samples,
 aligned/trimmed/final block length, final missing fraction, kept output fasta, and skip/fail reason for each block.
 Final primary outputs are:
 - `mt_supermatrix.fasta`
