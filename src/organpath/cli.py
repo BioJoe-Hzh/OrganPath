@@ -1877,7 +1877,11 @@ def summarize_hit_stats(
 
 
 def parse_blast_tab(
-    tab_path: Path, min_identity: float, min_len: int
+    tab_path: Path,
+    min_identity: float,
+    min_len: int,
+    query_lengths: Optional[Dict[str, int]] = None,
+    min_query_cov: float = 0.0,
 ) -> List[Tuple[str, int, int, str, float, int, int, int]]:
     hits: List[Tuple[str, int, int, str, float, int, int, int]] = []
     with tab_path.open("rt") as fh:
@@ -1895,6 +1899,11 @@ def parse_blast_tab(
             strand = "+" if sstart <= send else "-"
             if pident < min_identity or alen < min_len:
                 continue
+            if min_query_cov > 0:
+                qlen = query_lengths.get(qname, 0) if query_lengths else 0
+                qcov = (abs(qend - qstart) + 1) / qlen if qlen > 0 else 0.0
+                if qcov < min_query_cov:
+                    continue
             hits.append((qname, min(sstart, send), max(sstart, send), strand, pident, alen, qstart, qend))
     return hits
 
@@ -1924,6 +1933,7 @@ def map_hits_for_candidate(
     aligner: str,
     tmp_prefix: Path,
     best_only: bool = True,
+    min_query_cov: float = 0.0,
 ) -> Tuple[List[Tuple[str, int, int, str, float, int, int, int]], str]:
     tool = aligner
     if tool == "auto":
@@ -1947,7 +1957,16 @@ def map_hits_for_candidate(
                 stdout=out,
                 check=True,
             )
-        hits = parse_blast_tab(tmp, min_identity=min_identity, min_len=min_len)
+        query_lengths = None
+        if min_query_cov > 0:
+            query_lengths = {sid: len(seq) for sid, seq in read_fasta_sequences(contig_fa).items()}
+        hits = parse_blast_tab(
+            tmp,
+            min_identity=min_identity,
+            min_len=min_len,
+            query_lengths=query_lengths,
+            min_query_cov=min_query_cov,
+        )
     else:
         raise ValueError(f"Unsupported aligner: {aligner}. Allowed: auto, blastn")
     try:
@@ -1978,6 +1997,7 @@ def select_best_candidate_fasta(
     min_len: int,
     aligner: str,
     expected_len: Optional[int],
+    min_query_cov: float = 0.0,
 ) -> Tuple[Path, int]:
     unique: List[Path] = []
     seen_keys = set()
@@ -2004,6 +2024,7 @@ def select_best_candidate_fasta(
                 min_len=min_len,
                 aligner=aligner,
                 tmp_prefix=sample_out / f"{sample_name}.cand{i}",
+                min_query_cov=min_query_cov,
             )
         except Exception:
             chosen = []
@@ -2064,6 +2085,7 @@ def build_sample_assembly_from_contigs(
     cp_exclude_min_identity: float = 0.98,
     cp_exclude_min_len: int = 5000,
     cp_exclude_min_query_cov: float = 0.8,
+    orient_min_query_cov: float = 0.0,
 ) -> Tuple[str, int, int, str, Optional[Dict[str, str]], List[str]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     contigs = read_fasta_sequences(contig_fa)
@@ -2077,6 +2099,7 @@ def build_sample_assembly_from_contigs(
         min_len=min_len,
         aligner=aligner,
         tmp_prefix=out_dir / sample_name,
+        min_query_cov=orient_min_query_cov,
     )
     # path_sequence fasta often contains multiple alternative graph paths.
     # Keep only the best-scoring path to avoid concatenating alternative assemblies.
@@ -2136,6 +2159,7 @@ def build_sample_assembly_from_contigs(
             aligner=aligner,
             tmp_prefix=out_dir / f"{sample_name}.all_hsp",
             best_only=False,
+            min_query_cov=orient_min_query_cov,
         )
         all_ref_covered_bp, _all_mean_ident, _all_aligned_bp = summarize_hit_stats(
             all_seed_hits, ref_len=ref_total
@@ -2311,6 +2335,8 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"seed fasta not found: {seed}")
     if not (0.0 <= args.cp_exclude_min_query_cov <= 1.0):
         raise ValueError("--cp-exclude-min-query-cov must be within [0,1]")
+    if not (0.0 <= args.orient_min_query_cov <= 1.0):
+        raise ValueError("--orient-min-query-cov must be within [0,1]")
     out_dir.mkdir(parents=True, exist_ok=True)
     seed_seq = read_primary_fasta_sequence(seed)
     cp_exclude_ref: Optional[Path] = None
@@ -2428,6 +2454,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 min_len=min_len,
                 aligner=args.aligner,
                 expected_len=expected_one_ir_len,
+                min_query_cov=args.orient_min_query_cov,
             )
             stat_hits, _ = map_hits_for_candidate(
                 contig_fa=chosen_fa,
@@ -2437,6 +2464,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 aligner=args.aligner,
                 tmp_prefix=sample_out / f"{sample}.summary",
                 best_only=False,
+                min_query_cov=args.orient_min_query_cov,
             )
             ref_covered_bp, mean_identity, aligned_bp = summarize_hit_stats(stat_hits, ref_len=len(seed_seq))
             ref_covered_frac = (ref_covered_bp / len(seed_seq)) if len(seed_seq) > 0 else 0.0
@@ -2463,6 +2491,7 @@ def cmd_sort_organ(args: argparse.Namespace) -> int:
                 cp_exclude_min_identity=args.cp_exclude_min_identity,
                 cp_exclude_min_len=args.cp_exclude_min_len,
                 cp_exclude_min_query_cov=args.cp_exclude_min_query_cov,
+                orient_min_query_cov=args.orient_min_query_cov,
             )
             seqs = read_fasta_sequences(Path(out_fa))
             seq_non_n = sum(non_n_length(seq) for seq in seqs.values())
@@ -3406,6 +3435,7 @@ def cmd_channel_plant_pt(args: argparse.Namespace) -> int:
         cp_exclude_min_identity=0.98,
         cp_exclude_min_len=5000,
         cp_exclude_min_query_cov=0.8,
+        orient_min_query_cov=0.0,
     )
     return cmd_sort_organ(ss)
 
@@ -3449,6 +3479,7 @@ def cmd_channel_plant_mt(args: argparse.Namespace) -> int:
         cp_exclude_min_identity=args.cp_exclude_min_identity,
         cp_exclude_min_len=args.cp_exclude_min_len,
         cp_exclude_min_query_cov=args.cp_exclude_min_query_cov,
+        orient_min_query_cov=0.0,
     )
     cmd_sort_organ(ss)
 
@@ -3518,6 +3549,7 @@ def cmd_channel_animal_mt(args: argparse.Namespace) -> int:
         cp_exclude_min_identity=0.98,
         cp_exclude_min_len=5000,
         cp_exclude_min_query_cov=0.8,
+        orient_min_query_cov=0.0,
     )
     cmd_sort_organ(ss)
 
@@ -6007,6 +6039,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Number of Ns between selected contigs (default by --organelle-mode). Ignored in plant_mt multi-contig output mode.",
+    )
+    p_sort.add_argument(
+        "--orient-min-query-cov",
+        type=float,
+        default=0.0,
+        help="Minimum fraction of a query contig covered by seed hits before it is used for sorting/orientation (default: 0.0)",
     )
     p_sort.add_argument(
         "--cp-exclude-ref",

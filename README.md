@@ -74,6 +74,7 @@ OrganPath sortOrgan \
   --cp-exclude-min-identity 0.98 \
   --cp-exclude-min-len 5000 \
   --cp-exclude-min-query-cov 0.8 \
+  --orient-min-query-cov 0.6 \
   --min-identity 0.90 \
   --min-len 3000 \
   --min-non-n-len 8000
@@ -139,6 +140,7 @@ Outputs:
 
 `--min-non-n-len` only controls whether a sample is included in `assembled_samples.fasta`.
 Per-sample fasta is still written, and summary marks filtered rows as `FILTERED` with `non_n_len`.
+`--orient-min-query-cov` requires a seed/reference hit to cover at least this fraction of the query contig before it is used for sorting/orientation and `ref_covered_frac` summary statistics.
 
 For `plant_mt`, chloroplast exclusion is optional and conservative:
 - `--cp-exclude-ref`: chloroplast reference fasta used only for exclusion checking
