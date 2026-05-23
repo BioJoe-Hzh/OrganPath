@@ -2678,6 +2678,49 @@ def prepare_mtblocks_input_from_sortorgan(
     return combined, sample_map, mapping_tsv, selected_samples
 
 
+def list_root_fastas(input_dir: Path) -> List[Path]:
+    return sorted(p for p in input_dir.iterdir() if p.is_file() and is_sortorgan_input_fasta(p))
+
+
+def prepare_mtblocks_input_from_fasta_dir(
+    fasta_dir: Path,
+    out_dir: Path,
+) -> Tuple[Path, Dict[str, str], Path, List[str]]:
+    combined = out_dir / "mtblocks_input.fasta"
+    mapping_tsv = out_dir / "mtblocks_input.sample_map.tsv"
+    sample_map: Dict[str, str] = {}
+    selected_samples: List[str] = []
+    seen_samples: Dict[str, Path] = {}
+    written = 0
+
+    fastas = list_root_fastas(fasta_dir)
+    if not fastas:
+        raise ValueError(f"No FASTA files found in input directory: {fasta_dir}")
+
+    with combined.open("wt") as out, mapping_tsv.open("wt") as mp:
+        mp.write("record_id\tsample\torig_record_id\tsource_fasta\n")
+        for fa in fastas:
+            sample = fasta_sample_prefix(fa)
+            prev = seen_samples.get(sample)
+            if prev is not None:
+                raise ValueError(
+                    f"Multiple FASTA files resolve to the same sample prefix '{sample}': {prev} and {fa}"
+                )
+            seen_samples[sample] = fa
+            selected_samples.append(sample)
+            seqs = read_fasta_sequences(fa)
+            for rank, (orig_id, seq) in enumerate(seqs.items(), start=1):
+                record_id = make_contig_record_id(sample, orig_id, rank)
+                out.write(f">{record_id}\n{seq}\n")
+                mp.write(f"{record_id}\t{sample}\t{orig_id}\t{fa}\n")
+                sample_map[record_id] = sample
+                written += 1
+
+    if written == 0:
+        raise ValueError(f"No FASTA records found in input directory: {fasta_dir}")
+    return combined, sample_map, mapping_tsv, selected_samples
+
+
 def infer_mtblocks_sample_map_from_fasta(input_fa: Path) -> Dict[str, str]:
     seqs = read_fasta_sequences(input_fa)
     return {rid: sample_name_from_contig_record_id(rid) for rid in seqs}
@@ -3278,12 +3321,19 @@ def cmd_mt_blocks(args: argparse.Namespace) -> int:
         raise ValueError("--block-min-sites must be >= 1")
 
     if input_path.is_dir():
-        input_fa, sample_map, sample_map_tsv, selected_samples = prepare_mtblocks_input_from_sortorgan(
-            input_path,
-            out_dir=out_dir,
-            min_ref_cover_frac=args.sample_min_ref_cover_frac,
-        )
-        logger.info("mtBlocks input detected as sortOrgan directory: %s", input_path)
+        if list_root_fastas(input_path):
+            input_fa, sample_map, sample_map_tsv, selected_samples = prepare_mtblocks_input_from_fasta_dir(
+                input_path,
+                out_dir=out_dir,
+            )
+            logger.info("mtBlocks input detected as FASTA directory: %s", input_path)
+        else:
+            input_fa, sample_map, sample_map_tsv, selected_samples = prepare_mtblocks_input_from_sortorgan(
+                input_path,
+                out_dir=out_dir,
+                min_ref_cover_frac=args.sample_min_ref_cover_frac,
+            )
+            logger.info("mtBlocks input detected as sortOrgan directory: %s", input_path)
         logger.info("mtBlocks combined contig fasta: %s", input_fa)
         logger.info("mtBlocks sample map: %s", sample_map_tsv)
     else:
@@ -6143,7 +6193,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         "--input",
         required=True,
-        help="Input sortOrgan output directory or multifasta. Directory mode preserves per-sample multi-contig mt assemblies.",
+        help="Input sortOrgan output directory, directory containing FASTA files, or multifasta. Directory mode preserves per-sample multi-contig mt assemblies.",
     )
     p_mt.add_argument("-o", "--outdir", required=True, help="Output directory")
     p_mt.add_argument(

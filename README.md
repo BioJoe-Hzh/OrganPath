@@ -483,7 +483,12 @@ OrganPath mtBlocks \
   --run-ml
 ```
 
-Legacy multifasta input is still accepted, but directory input is preferred because it preserves each sample's separate mt contigs.
+`mtBlocks -i` accepts:
+- a `sortOrgan` output directory
+- a directory containing FASTA files directly; each FASTA filename prefix becomes the sample ID
+- a legacy multifasta input
+
+Directory input is preferred because it preserves each sample's separate mt contigs.
 
 `mtBlocks` now handles Pangraph internally:
 - `pangraph build --circular --output-json pangraph/pangraph_output.json`
