@@ -459,12 +459,13 @@ Key behavior:
 3. Run `pangraph export block-sequences`
 4. Flag duplicated samples in each block
 5. If one sample has duplicate identical sequences in a block, keep one copy; if duplicates differ, keep the copy most similar to the other samples
-6. per-block `mafft --adjustdirection` + `trimal`
+6. initial per-block `mafft --adjustdirection` + `trimal`
 7. drop low-quality samples within each block by consensus identity/coverage, then count sample presence
-8. By default, keep only blocks still present in at least 50% of samples
-9. optional site filtering
-10. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
-11. build an ML tree from the concatenated supermatrix with IQ-TREE
+8. rerun `mafft --adjustdirection` + `trimal` on the remaining samples for that block
+9. By default, keep only blocks still present in at least 50% of samples
+10. optional site filtering
+11. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
+12. build an ML tree from the concatenated supermatrix with IQ-TREE
 
 This is the recommended plant mitochondrial route:
 - keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
@@ -509,7 +510,7 @@ Useful `mtBlocks` block filters:
 - `--block-min-sites`: default `300`; skip blocks that are too short after trim/filter
 
 `mtblocks_summary.tsv` now records raw record count, unique sample count, sample presence fraction,
-duplicate-sample flags, conflicting multi-copy samples removed per block, short-sample removals, quality-filtered samples,
+duplicate-sample flags, conflicting multi-copy samples resolved per block, short-sample removals, quality-filtered samples,
 aligned/trimmed/final block length, final missing fraction, kept output fasta, and skip/fail reason for each block.
 Final primary outputs are:
 - `mt_supermatrix.fasta`

@@ -2964,35 +2964,33 @@ def process_mt_block(
         result["message"] = "too_few_samples<2"
         return result
 
+    initial_aln = out_dir / f"{block_fa.stem}.initial.aln.fasta"
+    initial_trimmed = out_dir / f"{block_fa.stem}.initial.trim.fasta"
+    quality_input = out_dir / f"{block_fa.stem}.quality_input.fasta"
     aln = out_dir / f"{block_fa.stem}.aln.fasta"
     trimmed = out_dir / f"{block_fa.stem}.trim.fasta"
-    sample_filtered = out_dir / f"{block_fa.stem}.sample_filtered.fasta"
     final_block = out_dir / f"{block_fa.stem}.final.fasta"
 
     try:
         run_alignment_with_direction(
             multifasta=collapsed_in,
-            aligned=aln,
+            aligned=initial_aln,
             mafft_bin=mafft_bin,
             adjust_direction=True,
             threads="1",
         )
-        run_command([trimal_bin, "-automated1", "-in", str(aln), "-out", str(trimmed)])
-        _aligned_samples, aligned_len, _aligned_missing = summarize_alignment_missing(aln)
-        trimmed_samples, trimmed_len, _trimmed_missing = summarize_alignment_missing(trimmed)
-        result["aligned_len"] = aligned_len
-        result["trimmed_len"] = trimmed_len
-        result["final_samples"] = trimmed_samples
+        run_command([trimal_bin, "-automated1", "-in", str(initial_aln), "-out", str(initial_trimmed)])
         message_bits: List[str] = []
         if raw_records != collapsed_samples:
             message_bits.append(f"collapsed_records:{raw_records}->{collapsed_samples}")
         if conflicting_samples:
-            message_bits.append(f"multicopy_removed:{len(conflicting_samples)}")
+            message_bits.append(f"multicopy_resolved:{len(conflicting_samples)}")
         if short_filtered_samples:
             message_bits.append(f"short_removed:{len(short_filtered_samples)}")
+        sample_filter_preview = out_dir / f"{block_fa.stem}.sample_filter_preview.fasta"
         _pre_quality_samples, quality_kept_samples, quality_filtered_samples = filter_alignment_samples_by_quality(
-            in_fa=trimmed,
-            out_fa=sample_filtered,
+            in_fa=initial_trimmed,
+            out_fa=sample_filter_preview,
             min_identity=min_sample_identity,
             min_cover_frac=min_sample_cover_frac,
         )
@@ -3022,17 +3020,42 @@ def process_mt_block(
             )
             return result
 
+        quality_keep_names = list(read_fasta_sequences(sample_filter_preview).keys())
+        quality_seqs = {sample: seqs[sample] for sample in quality_keep_names if sample in seqs}
+        if len(quality_seqs) < 2:
+            result["status"] = "SKIP"
+            result["message"] = (
+                f"{result['message']};too_few_raw_samples_after_quality<2"
+                if result["message"] != "-"
+                else "too_few_raw_samples_after_quality<2"
+            )
+            return result
+        write_fasta_sequences(quality_input, quality_seqs)
+        run_alignment_with_direction(
+            multifasta=quality_input,
+            aligned=aln,
+            mafft_bin=mafft_bin,
+            adjust_direction=True,
+            threads="1",
+        )
+        run_command([trimal_bin, "-automated1", "-in", str(aln), "-out", str(trimmed)])
+        _aligned_samples, aligned_len, _aligned_missing = summarize_alignment_missing(aln)
+        trimmed_samples, trimmed_len, _trimmed_missing = summarize_alignment_missing(trimmed)
+        result["aligned_len"] = aligned_len
+        result["trimmed_len"] = trimmed_len
+        result["final_samples"] = trimmed_samples
+
         if max_missing_frac < 1.0 or snp_only:
             kept_sites, _total_sites = filter_alignment_sites(
-                in_fa=sample_filtered,
+                in_fa=trimmed,
                 out_fa=final_block,
                 max_missing_frac=max_missing_frac,
                 snp_only=snp_only,
             )
             result["kept_sites"] = kept_sites
         else:
-            shutil.copyfile(sample_filtered, final_block)
-            result["kept_sites"] = summarize_alignment_missing(sample_filtered)[1]
+            shutil.copyfile(trimmed, final_block)
+            result["kept_sites"] = trimmed_len
 
         final_samples, final_len, final_missing_frac = summarize_alignment_missing(final_block)
         result["final_samples"] = final_samples
