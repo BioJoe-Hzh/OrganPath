@@ -2965,7 +2965,6 @@ def process_mt_block(
         return result
 
     initial_aln = out_dir / f"{block_fa.stem}.initial.aln.fasta"
-    initial_trimmed = out_dir / f"{block_fa.stem}.initial.trim.fasta"
     quality_input = out_dir / f"{block_fa.stem}.quality_input.fasta"
     aln = out_dir / f"{block_fa.stem}.aln.fasta"
     trimmed = out_dir / f"{block_fa.stem}.trim.fasta"
@@ -2979,7 +2978,6 @@ def process_mt_block(
             adjust_direction=True,
             threads="1",
         )
-        run_command([trimal_bin, "-automated1", "-in", str(initial_aln), "-out", str(initial_trimmed)])
         message_bits: List[str] = []
         if raw_records != collapsed_samples:
             message_bits.append(f"collapsed_records:{raw_records}->{collapsed_samples}")
@@ -2989,7 +2987,7 @@ def process_mt_block(
             message_bits.append(f"short_removed:{len(short_filtered_samples)}")
         sample_filter_preview = out_dir / f"{block_fa.stem}.sample_filter_preview.fasta"
         _pre_quality_samples, quality_kept_samples, quality_filtered_samples = filter_alignment_samples_by_quality(
-            in_fa=initial_trimmed,
+            in_fa=initial_aln,
             out_fa=sample_filter_preview,
             min_identity=min_sample_identity,
             min_cover_frac=min_sample_cover_frac,

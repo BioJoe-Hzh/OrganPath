@@ -459,13 +459,14 @@ Key behavior:
 3. Run `pangraph export block-sequences`
 4. Flag duplicated samples in each block
 5. If one sample has duplicate identical sequences in a block, keep one copy; if duplicates differ, keep the copy most similar to the other samples
-6. initial per-block `mafft --adjustdirection` + `trimal`
-7. drop low-quality samples within each block by consensus identity/coverage, then count sample presence
-8. rerun `mafft --adjustdirection` + `trimal` on the remaining samples for that block
-9. By default, keep only blocks still present in at least 50% of samples
-10. optional site filtering
-11. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
-12. build an ML tree from the concatenated supermatrix with IQ-TREE
+6. initial per-block `mafft --adjustdirection`
+7. drop low-quality samples within each block by consensus identity/coverage from the initial alignment, then count sample presence
+8. rerun `mafft --adjustdirection` on the remaining samples for that block
+9. run `trimal` on the final per-block alignment
+10. By default, keep only blocks still present in at least 50% of samples
+11. optional site filtering
+12. concatenate kept blocks from long to short into `mt_supermatrix.fasta` (`mt_partitions.txt`)
+13. build an ML tree from the concatenated supermatrix with IQ-TREE
 
 This is the recommended plant mitochondrial route:
 - keep `sortOrgan` `plant_mt` outputs as multi-contig FASTA per sample
