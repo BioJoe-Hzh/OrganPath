@@ -1024,6 +1024,101 @@ def write_fasta_sequences(path: Path, seqs: Dict[str, str]) -> None:
             out.write(f">{sid}\n{seq}\n")
 
 
+def read_sample_list(path: Path) -> List[str]:
+    samples: List[str] = []
+    seen = set()
+    with path.open("rt") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            sample = line.split()[0]
+            if sample in seen:
+                raise ValueError(f"Duplicate sample in sample list: {sample}")
+            seen.add(sample)
+            samples.append(sample)
+    if not samples:
+        raise ValueError(f"No samples found in sample list: {path}")
+    return samples
+
+
+def concatenate_multifastas_by_samples(
+    multifasta_paths: Sequence[Path],
+    out_fasta: Path,
+    samples: Optional[Sequence[str]] = None,
+    missing_report: Optional[Path] = None,
+    partitions_path: Optional[Path] = None,
+    gap_char: str = "-",
+) -> Dict[str, object]:
+    if not multifasta_paths:
+        raise ValueError("At least one multi-FASTA input is required.")
+    if len(gap_char) != 1:
+        raise ValueError("gap_char must be a single character.")
+
+    blocks: List[Tuple[Path, Dict[str, str], int]] = []
+    inferred_samples: List[str] = []
+    seen_samples = set()
+    for path in multifasta_paths:
+        seqs = read_fasta_sequences(path)
+        lengths = {len(seq) for seq in seqs.values()}
+        if len(lengths) != 1:
+            raise ValueError(f"Sequences in multi-FASTA do not have equal lengths: {path}")
+        block_len = next(iter(lengths))
+        blocks.append((path, seqs, block_len))
+        for sample in seqs:
+            if sample not in seen_samples:
+                seen_samples.add(sample)
+                inferred_samples.append(sample)
+
+    sample_order = list(samples) if samples is not None else inferred_samples
+    if len(sample_order) != len(set(sample_order)):
+        raise ValueError("Sample order contains duplicate sample IDs.")
+    if not sample_order:
+        raise ValueError("No samples available for concatenation.")
+
+    concatenated: Dict[str, str] = {sample: "" for sample in sample_order}
+    missing_rows: List[Tuple[str, int, str, int]] = []
+    start = 1
+    partition_rows: List[Tuple[str, int, int, str]] = []
+    for block_index, (path, seqs, block_len) in enumerate(blocks, start=1):
+        end = start + block_len - 1
+        partition_rows.append((safe_filename(path.stem), start, end, str(path)))
+        for sample in sample_order:
+            seq = seqs.get(sample)
+            if seq is None:
+                seq = gap_char * block_len
+                missing_rows.append((sample, block_index, str(path), block_len))
+            concatenated[sample] += seq
+        start = end + 1
+
+    out_fasta.parent.mkdir(parents=True, exist_ok=True)
+    write_fasta_sequences(out_fasta, concatenated)
+
+    if missing_report is not None:
+        missing_report.parent.mkdir(parents=True, exist_ok=True)
+        with missing_report.open("wt") as out:
+            out.write("sample\tblock_index\tblock_file\tfilled_length\n")
+            for sample, block_index, path, block_len in missing_rows:
+                out.write(f"{sample}\t{block_index}\t{path}\t{block_len}\n")
+
+    if partitions_path is not None:
+        partitions_path.parent.mkdir(parents=True, exist_ok=True)
+        with partitions_path.open("wt") as out:
+            out.write("partition\tstart\tend\tblock_file\n")
+            for name, pstart, pend, path in partition_rows:
+                out.write(f"{name}\t{pstart}\t{pend}\t{path}\n")
+
+    return {
+        "samples": len(sample_order),
+        "blocks": len(blocks),
+        "total_length": sum(block_len for _path, _seqs, block_len in blocks),
+        "missing_cells": len(missing_rows),
+        "out_fasta": str(out_fasta),
+        "missing_report": str(missing_report) if missing_report else "",
+        "partitions": str(partitions_path) if partitions_path else "",
+    }
+
+
 def filter_alignment_sites(
     in_fa: Path,
     out_fa: Path,
@@ -4877,6 +4972,39 @@ def cmd_align(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_concat_fasta(args: argparse.Namespace) -> int:
+    inputs = [Path(x).resolve() for x in args.inputs]
+    for path in inputs:
+        if not path.exists():
+            raise FileNotFoundError(f"Input multi-FASTA not found: {path}")
+    samples = read_sample_list(Path(args.samples).resolve()) if args.samples else None
+    out_fasta = Path(args.output).resolve()
+    missing_report = (
+        Path(args.missing_report).resolve()
+        if args.missing_report
+        else out_fasta.with_suffix(out_fasta.suffix + ".missing.tsv")
+    )
+    partitions = Path(args.partitions).resolve() if args.partitions else None
+    stats = concatenate_multifastas_by_samples(
+        multifasta_paths=inputs,
+        out_fasta=out_fasta,
+        samples=samples,
+        missing_report=missing_report,
+        partitions_path=partitions,
+        gap_char=args.gap_char,
+    )
+    logger.info(
+        "concatFasta completed: samples=%s blocks=%s total_length=%s missing_cells=%s output=%s missing_report=%s",
+        stats["samples"],
+        stats["blocks"],
+        stats["total_length"],
+        stats["missing_cells"],
+        stats["out_fasta"],
+        stats["missing_report"],
+    )
+    return 0
+
+
 def cmd_phyview(args: argparse.Namespace) -> int:
     trimmed = Path(args.input).resolve()
     out_dir = Path(args.outdir).resolve()
@@ -5974,6 +6102,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="In --plant-pt-partition mode, drop a sample if any partition missing fraction exceeds this threshold (applied right after MAFFT)",
     )
     p_align.set_defaults(func=cmd_align)
+
+    p_concat = subs.add_parser(
+        "concatFasta",
+        help="Concatenate multiple aligned multi-FASTA files by sample ID, filling missing samples with gaps",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_concat.add_argument(
+        "-i",
+        "--inputs",
+        nargs="+",
+        required=True,
+        help="Input aligned multi-FASTA files; concatenated in the exact order provided",
+    )
+    p_concat.add_argument("-o", "--output", required=True, help="Output concatenated FASTA")
+    p_concat.add_argument(
+        "--samples",
+        help="Optional sample order file, one sample ID per line. If omitted, use first-seen sample order across inputs.",
+    )
+    p_concat.add_argument(
+        "--missing-report",
+        help="TSV report of missing sample/block cells. Default: <output>.missing.tsv",
+    )
+    p_concat.add_argument(
+        "--partitions",
+        help="Optional TSV recording concatenated block coordinates",
+    )
+    p_concat.add_argument("--gap-char", default="-", help="Single character used to fill missing samples")
+    p_concat.set_defaults(func=cmd_concat_fasta)
 
     p_rename = subs.add_parser(
         "RenameTree",

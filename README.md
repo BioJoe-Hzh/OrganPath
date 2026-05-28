@@ -422,6 +422,22 @@ OrganPath RenameTree \
   -o renamed.treefile
 ```
 
+Concatenate aligned multi-FASTA blocks by sample ID:
+
+```bash
+OrganPath concatFasta \
+  -i gene1.fasta gene2.fasta gene3.fasta \
+  -o concatenated.fasta \
+  --samples sample_order.txt \
+  --missing-report concatenated.missing.tsv \
+  --partitions concatenated.partitions.tsv
+```
+
+Inputs are concatenated in the exact order provided. If a sample is missing from
+one block, OrganPath fills that block with `-` characters matching the block
+length and records the event in the missing report. If `--samples` is omitted,
+sample order is inferred from first appearance across the input files.
+
 Build ngsLCA-ready taxonomy from a tree + MSA (+ optional tip rename map):
 
 ```bash
