@@ -5249,6 +5249,14 @@ def support_passes_cutoff(label: Optional[str], cutoff: float) -> bool:
     return all(v > cutoff for v in vals)
 
 
+def clade_support_label(clade) -> Optional[str]:
+    if getattr(clade, "confidence", None) is not None:
+        return str(clade.confidence)
+    if getattr(clade, "name", None):
+        return str(clade.name)
+    return None
+
+
 def lineage_to_root_taxids(taxid: int, rows: Dict[int, TreeTaxonRow]) -> List[int]:
     lineage: List[int] = []
     seen = set()
@@ -5291,7 +5299,7 @@ def build_clade_infos_from_tree(
     qualifying_nodes = [
         clade
         for clade in tree.find_clades(order="preorder")
-        if clade.clades and support_passes_cutoff(clade.name, support_cutoff)
+        if clade.clades and support_passes_cutoff(clade_support_label(clade), support_cutoff)
     ]
     assigned_taxids: Dict[int, int] = {}
     infos: List[TreeCladeInfo] = []
@@ -5319,7 +5327,7 @@ def build_clade_infos_from_tree(
                 parent_taxid=parent_taxid,
                 rank=clade_rank,
                 name=f"{clade_name_prefix}_{idx:06d}",
-                support_label=str(clade.name),
+                support_label=str(clade_support_label(clade) or ""),
                 descendant_tips=descendant_tips,
                 taxonomy_lca_taxid=lca_taxid,
                 nearest_parent_clade_taxid=parent_clade_taxid,
