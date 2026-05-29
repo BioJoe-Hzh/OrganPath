@@ -1049,11 +1049,14 @@ def concatenate_multifastas_by_samples(
     missing_report: Optional[Path] = None,
     partitions_path: Optional[Path] = None,
     gap_char: str = "-",
+    spacer_n: int = 0,
 ) -> Dict[str, object]:
     if not multifasta_paths:
         raise ValueError("At least one multi-FASTA input is required.")
     if len(gap_char) != 1:
         raise ValueError("gap_char must be a single character.")
+    if spacer_n < 0:
+        raise ValueError("spacer_n must be >= 0.")
 
     blocks: List[Tuple[Path, Dict[str, str], int]] = []
     inferred_samples: List[str] = []
@@ -1081,6 +1084,14 @@ def concatenate_multifastas_by_samples(
     start = 1
     partition_rows: List[Tuple[str, int, int, str]] = []
     for block_index, (path, seqs, block_len) in enumerate(blocks, start=1):
+        if block_index > 1 and spacer_n > 0:
+            spacer = "N" * spacer_n
+            spacer_start = start
+            spacer_end = start + spacer_n - 1
+            partition_rows.append((f"spacer_{block_index - 1:06d}", spacer_start, spacer_end, "N_spacer"))
+            for sample in sample_order:
+                concatenated[sample] += spacer
+            start = spacer_end + 1
         end = start + block_len - 1
         partition_rows.append((safe_filename(path.stem), start, end, str(path)))
         for sample in sample_order:
@@ -1111,7 +1122,8 @@ def concatenate_multifastas_by_samples(
     return {
         "samples": len(sample_order),
         "blocks": len(blocks),
-        "total_length": sum(block_len for _path, _seqs, block_len in blocks),
+        "spacer_n": spacer_n,
+        "total_length": sum(block_len for _path, _seqs, block_len in blocks) + max(0, len(blocks) - 1) * spacer_n,
         "missing_cells": len(missing_rows),
         "out_fasta": str(out_fasta),
         "missing_report": str(missing_report) if missing_report else "",
@@ -4992,11 +5004,13 @@ def cmd_concat_fasta(args: argparse.Namespace) -> int:
         missing_report=missing_report,
         partitions_path=partitions,
         gap_char=args.gap_char,
+        spacer_n=args.spacer_n,
     )
     logger.info(
-        "concatFasta completed: samples=%s blocks=%s total_length=%s missing_cells=%s output=%s missing_report=%s",
+        "concatFasta completed: samples=%s blocks=%s spacer_n=%s total_length=%s missing_cells=%s output=%s missing_report=%s",
         stats["samples"],
         stats["blocks"],
+        stats["spacer_n"],
         stats["total_length"],
         stats["missing_cells"],
         stats["out_fasta"],
@@ -6129,6 +6143,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional TSV recording concatenated block coordinates",
     )
     p_concat.add_argument("--gap-char", default="-", help="Single character used to fill missing samples")
+    p_concat.add_argument(
+        "--spacer-n",
+        type=int,
+        default=0,
+        help="Number of N characters inserted between adjacent input blocks",
+    )
     p_concat.set_defaults(func=cmd_concat_fasta)
 
     p_rename = subs.add_parser(

@@ -429,6 +429,7 @@ OrganPath concatFasta \
   -i gene1.fasta gene2.fasta gene3.fasta \
   -o concatenated.fasta \
   --samples sample_order.txt \
+  --spacer-n 200 \
   --missing-report concatenated.missing.tsv \
   --partitions concatenated.partitions.tsv
 ```
@@ -436,7 +437,9 @@ OrganPath concatFasta \
 Inputs are concatenated in the exact order provided. If a sample is missing from
 one block, OrganPath fills that block with `-` characters matching the block
 length and records the event in the missing report. If `--samples` is omitted,
-sample order is inferred from first appearance across the input files.
+sample order is inferred from first appearance across the input files. Use
+`--spacer-n` to insert that many `N` characters between adjacent blocks for all
+samples; spacer rows are recorded in the partitions TSV.
 
 Build ngsLCA-ready taxonomy from a tree + MSA (+ optional tip rename map):
 
